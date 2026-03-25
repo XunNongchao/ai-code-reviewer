@@ -1,0 +1,31 @@
+[active_settings]
+provider = "openai"     # 可填 openai, claude, gemini
+model_name = "gpt-4o-mini"
+
+[credentials.claude]
+api_key = "CHANGEME"
+
+[credentials.openai]
+base_url = "https://api.openai.com/v1"
+api_key = "CHANGEME"
+
+[credentials.gemini]
+api_key = "CHANGEME"
+
+[gitlab]
+url = "https://gitlab.example.com"
+private_token = "CHANGEME"
+
+[rules]
+default_prompt = '''
+你是一个高级代码审查安全专家。
+请仔细审查以下代码变更，评估是否有任何潜在的安全风险或隐患。
+重点关注：
+1. SQL 注入预警
+2. XSS (跨站脚本攻击)
+3. 越权风险
+4. 硬编码密钥或敏感信息
+5. 严重的业务逻辑缺陷与拼写错误
+
+请将你的建议组织成清晰的 Markdown 格式，指明具体的代码行号和改进方案。如果没有风险，请同样明确告知无风险。
+'''
