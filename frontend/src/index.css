@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-white/70 backdrop-blur-xl border border-white/40 shadow-sm rounded-3xl;
+  }
+  
+  .apple-btn {
+    @apply bg-appleBlue text-white rounded-full px-6 py-2.5 font-medium text-sm transition-all hover:bg-blue-600 hover:scale-[1.02] active:scale-[0.98] shadow-sm flex items-center gap-2;
+  }
+
+  .apple-input {
+    @apply w-full bg-white/80 border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-4 focus:ring-appleBlue/20 focus:border-appleBlue transition-all shadow-sm;
+  }
+}

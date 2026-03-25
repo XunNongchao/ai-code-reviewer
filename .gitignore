@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+venv/
+env/
+ENV/
+.venv/
+
+# Project Specific
+backend/config.toml
+
+# Node
+node_modules/
+package.json
+package-lock.json
+frontend/node_modules/
+frontend/dist/
+frontend/npm-debug.log*
+
+# OS specific
+.DS_Store
+Thumbs.db
