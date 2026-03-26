@@ -2,8 +2,11 @@ import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { 
   Settings, FileCode2, Play, GitMerge, 
-  CheckCircle2, ShieldAlert, Key, Link 
+  CheckCircle2, ShieldAlert, Key, Link
 } from 'lucide-react';
+
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 // API 配置 (前端端口是5173，后端如果是8000，则设置baseURL)
 const api = axios.create({
@@ -12,16 +15,18 @@ const api = axios.create({
 
 function App() {
   const [activeTab, setActiveTab] = useState('review');
-  const [projectId, setProjectId] = useState('');
-  const [mrIid, setMrIid] = useState('');
+  const [mrUrl, setMrUrl] = useState('');
+  const [parsedMR, setParsedMR] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState(null);
+  
+  const [reviewReport, setReviewReport] = useState(null);
+  const [statusMessage, setStatusMessage] = useState('');
 
   const [config, setConfig] = useState({
-    active_settings: { provider: 'claude', model_name: '' },
+    llm_config: { provider: 'openai', model_name: '', base_url: '', api_key: '' },
     rules: { default_prompt: '' },
-    gitlab: { url: '', private_token: '' },
-    credentials: { openai: { api_key: '' }, claude: { api_key: '' }, gemini: { api_key: '' } }
+    gitlab: { url: '', private_token: '' }
   });
 
   // 获取配置
@@ -33,20 +38,73 @@ function App() {
 
   const triggerReview = async (e) => {
     e.preventDefault();
-    if (!projectId || !mrIid) return;
+    if (!mrUrl) return;
     
+    // 解析 URL
+    const match = mrUrl.match(/^(https?:\/\/[^\/]+)\/(.+?)\/-\/merge_requests\/(\d+)/);
+    if (match) {
+      setParsedMR({ projectId: match[2], mrIid: match[3] });
+    } else {
+      setParsedMR({ projectId: '未知项目', mrIid: '未知ID' });
+    }
+
     setIsSubmitting(true);
     setMessage(null);
+    setReviewReport('');
+    setStatusMessage('分析合并请求地址并请求后端...');
+    
     try {
-      await api.post('/review', { 
-        project_id: projectId, 
-        mr_iid: parseInt(mrIid) 
+      const response = await fetch('http://localhost:8000/api/review/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: mrUrl }),
       });
-      setMessage({ type: 'success', text: '审查任务已后台启动，您可以去 GitLab MR 页面刷新查看报告。' });
-      setProjectId('');
-      setMrIid('');
+      
+      if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        
+        const lines = text.split('\n\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const dataStr = line.replace('data: ', '');
+            if (!dataStr.trim()) continue;
+            try {
+              const data = JSON.parse(dataStr);
+              if (data.status === 'streaming') {
+                setReviewReport(prev => (prev || '') + data.chunk);
+                setStatusMessage('大语言模型正在深度分析代码中...');
+              } else if (data.status === 'info') {
+                setStatusMessage(data.message);
+                if (data.message.includes('✅')) {
+                   setReviewReport(prev => (prev || '') + data.message);
+                }
+              } else if (data.status === 'error') {
+                setMessage({ type: 'error', text: data.message });
+                setIsSubmitting(false);
+                setStatusMessage('');
+                return;
+              } else if (data.status === 'done') {
+                setMessage({ type: 'success', text: data.message });
+                setStatusMessage('');
+              }
+            } catch (err) {
+               console.error("解析SSE出错", err);
+            }
+          }
+        }
+      }
     } catch (error) {
-      setMessage({ type: 'error', text: '请求失败，请确保后端服务 (8000) 正在运行。' });
+      setMessage({ type: 'error', text: '网络请求失败，请确保后端服务 (8000) 正在运行。' });
+      setStatusMessage('');
     }
     setIsSubmitting(false);
   };
@@ -105,115 +163,219 @@ function App() {
 
         {activeTab === 'review' ? (
           <div className="glass-panel p-8 md:p-10">
-            <div className="max-w-xl mx-auto text-center mb-10">
-              <h2 className="text-3xl font-semibold tracking-tight mb-3">一键审查 Merge Request</h2>
-              <p className="text-gray-500 text-sm">输入 GitLab 的项目 ID 与合并请求 IID，由 AI 在后台深度梳理变更并回评。</p>
+            <div>
+              <div className="max-w-xl mx-auto text-center mb-8">
+                <h2 className="text-3xl font-semibold tracking-tight mb-3">自动化 MR 审查</h2>
+                <p className="text-gray-500 text-sm">黏贴 GitLab URL，无需繁琐人工操作，后端直连自动拉取 Diff 分析并回评</p>
+              </div>
+
+              {isSubmitting || reviewReport ? (
+                <div className="max-w-xl mx-auto flex flex-col sm:flex-row items-center justify-between bg-white shadow-sm p-4 rounded-2xl border border-gray-100 gap-4 transition-all animate-in fade-in zoom-in duration-300">
+                   <div className="flex items-center gap-3 w-full">
+                      <div className="flex-shrink-0 w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-appleBlue">
+                        <GitMerge size={20} />
+                      </div>
+                      <div className="text-left min-w-0 flex-1">
+                         <div className="text-xs text-gray-400 font-medium mb-0.5">正在审查当前代码合并记录</div>
+                         <div className="text-sm font-semibold text-gray-700 truncate w-full flex items-center gap-1.5">
+                            <span className="truncate">{parsedMR?.projectId}</span>
+                            <span className="text-gray-300 flex-shrink-0">/</span>
+                            <span className="text-appleBlue flex-shrink-0">!{parsedMR?.mrIid}</span>
+                         </div>
+                      </div>
+                   </div>
+                </div>
+              ) : (
+                <form onSubmit={triggerReview} className="max-w-xl mx-auto space-y-5">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2 ml-2 flex items-center justify-between">
+                       <span>GitLab Merge Request 地址</span>
+                    </label>
+                    <div className="relative">
+                      <Link className="absolute left-4 top-3.5 text-gray-400" size={18} />
+                      <input 
+                        type="url" 
+                        value={mrUrl}
+                        onChange={(e) => setMrUrl(e.target.value)}
+                        placeholder="例：https://gitlab.../-/merge_requests/3122" 
+                        className="apple-input pl-11"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-4">
+                    <button 
+                      type="submit" 
+                      disabled={isSubmitting}
+                      className="w-full apple-btn justify-center py-3.5 shadow-md shadow-appleBlue/20"
+                    >
+                      <Play size={18} className={isSubmitting ? 'animate-pulse' : ''} />
+                      {isSubmitting ? '启动审查流...' : '一键开始审查代码'}
+                    </button>
+                  </div>
+                </form>
+              )}
             </div>
 
-            <form onSubmit={triggerReview} className="max-w-md mx-auto space-y-5">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2 ml-2">项目 Project ID</label>
-                <div className="relative">
-                  <FileCode2 className="absolute left-4 top-3.5 text-gray-400" size={18} />
-                  <input 
-                    type="text" 
-                    value={projectId}
-                    onChange={(e) => setProjectId(e.target.value)}
-                    placeholder="例如：12345" 
-                    className="apple-input pl-11"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2 ml-2">Merge Request IID</label>
-                <div className="relative">
-                  <GitMerge className="absolute left-4 top-3.5 text-gray-400" size={18} />
-                  <input 
-                    type="number" 
-                    value={mrIid}
-                    onChange={(e) => setMrIid(e.target.value)}
-                    placeholder="例如：88" 
-                    className="apple-input pl-11"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="pt-4">
-                <button 
-                  type="submit" 
-                  disabled={isSubmitting}
-                  className="w-full apple-btn justify-center py-3.5"
-                >
-                  <Play size={18} className={isSubmitting ? 'animate-pulse' : ''} />
-                  {isSubmitting ? '正在调起 AI 审查...' : '开始代码审查'}
-                </button>
-              </div>
-            </form>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            
-            {/* Setting Panel 1 */}
-            <div className="glass-panel p-8">
-              <div className="flex items-center gap-3 mb-6">
-                <Settings className="text-appleBlue" size={24} />
-                <h3 className="text-xl font-semibold">大语言模型配置</h3>
-              </div>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">当前首选模型厂商</label>
-                  <select 
-                    className="apple-input bg-white"
-                    value={config.active_settings?.provider || 'openai'}
-                    onChange={(e) => setConfig({...config, active_settings: {...config.active_settings, provider: e.target.value}})}
-                  >
-                    <option value="openai">OpenAI (GPT-4 家族)</option>
-                    <option value="claude">Anthropic (Claude 3 家族)</option>
-                    <option value="gemini">Google (Gemini 家族)</option>
-                  </select>
+            {(statusMessage || reviewReport || isSubmitting) && (
+              <div className="mt-8 pt-4 max-w-2xl mx-auto text-left animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="flex items-center justify-between mb-4 px-2">
+                   <h3 className="text-xl font-semibold flex items-center gap-2 text-appleGray-800">
+                     <span className="text-2xl">🤖</span> AI 实时审查报告
+                   </h3>
+                   {statusMessage && (
+                     <div className="flex items-center gap-2 text-sm text-appleBlue font-medium bg-blue-50 px-3 py-1.5 rounded-full animate-pulse">
+                        <div className="w-2 h-2 rounded-full bg-appleBlue"></div>
+                        {statusMessage}
+                     </div>
+                   )}
                 </div>
                 
-                <div>
-                  <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">模型名称 (Model Name)</label>
-                  <input 
-                    type="text" 
-                    className="apple-input" 
-                    value={config.active_settings?.model_name || ''}
-                    onChange={(e) => setConfig({...config, active_settings: {...config.active_settings, model_name: e.target.value}})}
-                    placeholder="例如：gpt-4o"
-                  />
+                <div className="relative overflow-hidden group">
+                  <div className="absolute inset-0 bg-gradient-to-tr from-blue-50/50 to-white pointer-events-none rounded-3xl" />
+                  <div className="relative z-10 text-[15px] text-gray-700 bg-white/60 backdrop-blur-sm shadow-sm p-6 sm:p-8 rounded-3xl border border-gray-100 min-h-[160px]">
+                     {reviewReport ? (
+                       <div className="prose prose-sm md:prose-base max-w-none prose-blue">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                             {reviewReport}
+                          </ReactMarkdown>
+                       </div>
+                     ) : (
+                       <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-3 py-10">
+                          <div className="w-8 h-8 relative">
+                             <div className="absolute inset-0 rounded-full border-2 border-gray-200"></div>
+                             <div className="absolute inset-0 rounded-full border-2 border-appleBlue border-t-transparent animate-spin"></div>
+                          </div>
+                          <span>正在准备输出内容...</span>
+                       </div>
+                     )}
+                     {isSubmitting && reviewReport && (
+                        <span className="inline-block ml-1 w-1.5 h-[1.1em] align-middle bg-appleBlue animate-pulse"></span>
+                     )}
+                  </div>
                 </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+            
+            <div className="space-y-6">
+              {/* Setting Panel 1: LLM Config */}
+              <div className="glass-panel p-8">
+                <div className="flex items-center gap-3 mb-6">
+                  <Settings className="text-appleBlue" size={24} />
+                  <h3 className="text-xl font-semibold">大语言模型配置</h3>
+                </div>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">后端大模型 Provider (接入协议)</label>
+                    <select 
+                      className="apple-input bg-white font-medium"
+                      value={config.llm_config?.provider || 'openai'}
+                      onChange={(e) => setConfig({
+                        ...config, 
+                        llm_config: { ...config.llm_config, provider: e.target.value }
+                      })}
+                    >
+                      <option value="openai">OpenAI (官方接口)</option>
+                      <option value="anthropic">Anthropic (官方接口)</option>
+                      <option value="custom">Custom (兼容 OpenAI 格式的中转站/代理/智谱API)</option>
+                    </select>
+                  </div>
 
-                <div className="pt-4 border-t border-gray-100">
-                  <label className="block text-sm font-medium text-gray-600 mb-2 ml-1 flex items-center gap-2">
-                    <Key size={14}/> 当前模型的 API Key
-                  </label>
-                  <input 
-                    type="password" 
-                    className="apple-input"
-                    value={config.credentials?.[config.active_settings?.provider]?.api_key || ''}
-                    onChange={(e) => {
-                      const p = config.active_settings.provider;
-                      setConfig({
-                        ...config,
-                        credentials: {
-                          ...config.credentials,
-                          [p]: { ...config.credentials[p], api_key: e.target.value }
-                        }
-                      });
-                    }}
-                    placeholder={`sk-${config.active_settings?.provider}-...`}
-                  />
+                  <div>
+                     <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">接口地址 (Base URL)</label>
+                     <div className="relative">
+                        <Link className="absolute left-4 top-3.5 text-gray-400" size={16} />
+                        <input 
+                          type="text" 
+                          className="apple-input pl-11" 
+                          value={config.llm_config?.base_url || ''}
+                          onChange={(e) => setConfig({
+                            ...config, 
+                            llm_config: { ...config.llm_config, base_url: e.target.value }
+                          })}
+                          placeholder="例如中转站或智谱: https://open.bigmodel.cn/api/paas/v4"
+                        />
+                     </div>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">模型名称 (Model)</label>
+                    <input 
+                      type="text" 
+                      className="apple-input" 
+                      value={config.llm_config?.model_name || ''}
+                      onChange={(e) => setConfig({
+                        ...config, 
+                        llm_config: { ...config.llm_config, model_name: e.target.value }
+                      })}
+                      placeholder="例如：glm-4 或 gpt-4o-mini"
+                    />
+                  </div>
+
+                  <div className="pt-4 border-t border-gray-100">
+                    <label className="block text-sm font-medium text-gray-600 mb-2 ml-1 flex items-center gap-2">
+                      <Key size={14}/> 认证 API Key
+                    </label>
+                    <input 
+                      type="password" 
+                      className="apple-input"
+                      value={config.llm_config?.api_key || ''}
+                      onChange={(e) => setConfig({
+                        ...config, 
+                        llm_config: { ...config.llm_config, api_key: e.target.value }
+                      })}
+                      placeholder={`sk-...`}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Setting Panel 3: GitLab Config */}
+              <div className="glass-panel p-8">
+                <div className="flex items-center gap-3 mb-6">
+                  <GitMerge className="text-appleBlue" size={24} />
+                  <h3 className="text-xl font-semibold">GitLab 私有库配置</h3>
+                </div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">GitLab 实例地址</label>
+                    <input 
+                      type="url" 
+                      className="apple-input" 
+                      value={config.gitlab?.url || ''}
+                      onChange={(e) => setConfig({
+                        ...config, 
+                        gitlab: { ...config.gitlab, url: e.target.value }
+                      })}
+                      placeholder="例如：https://gitlab.pharmacyyf.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-600 mb-2 ml-1 flex items-center gap-2">
+                      <Key size={14}/> GitLab Private Token
+                    </label>
+                    <input 
+                      type="password" 
+                      className="apple-input" 
+                      value={config.gitlab?.private_token || ''}
+                      onChange={(e) => setConfig({
+                        ...config, 
+                        gitlab: { ...config.gitlab, private_token: e.target.value }
+                      })}
+                      placeholder="填写入具有拉取代码与回评权限的 Token"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
 
-            {/* Setting Panel 2 */}
-            <div className="glass-panel p-8 flex flex-col">
+            {/* Setting Panel 2: Prompt Rules */}
+            <div className="glass-panel p-8 flex flex-col h-full">
               <div className="flex items-center gap-3 mb-6">
                 <FileCode2 className="text-appleBlue" size={24} />
                 <h3 className="text-xl font-semibold">代码审计规则 (Prompt)</h3>
@@ -222,15 +384,15 @@ function App() {
               <div className="flex-1 flex flex-col">
                 <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">默认系统提示词</label>
                 <textarea 
-                  className="apple-input flex-1 resize-none py-4 leading-relaxed bg-gray-50/50 block w-full" 
+                  className="apple-input flex-1 resize-y min-h-[300px] py-4 leading-relaxed bg-gray-50/50 block w-full" 
                   value={config.rules?.default_prompt || ''}
                   onChange={(e) => setConfig({...config, rules: {...config.rules, default_prompt: e.target.value}})}
                   placeholder="请输入您的自定义审查要求..."
                 />
               </div>
 
-              <div className="mt-6 flex justify-end">
-                 <button onClick={handleSaveConfig} disabled={isSubmitting} className="apple-btn px-8">
+              <div className="mt-8 pt-6 border-t border-gray-100 flex justify-end">
+                 <button onClick={handleSaveConfig} disabled={isSubmitting} className="apple-btn px-10">
                    {isSubmitting ? '保存中...' : '保存全局配置'}
                  </button>
               </div>

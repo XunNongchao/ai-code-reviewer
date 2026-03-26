@@ -1,8 +1,9 @@
 [active_settings]
-provider = "openai"     # 可填 openai, claude, gemini
+provider = "openai"     # 可填 openai, claude, gemini, zhipu, custom_openai
 model_name = "gpt-4o-mini"
 
 [credentials.claude]
+base_url = "https://open.bigmodel.cn/api/paas/v4" # 智谱GLM5或第三方代理使用的base URL地址
 api_key = "CHANGEME"
 
 [credentials.openai]
@@ -10,6 +11,16 @@ base_url = "https://api.openai.com/v1"
 api_key = "CHANGEME"
 
 [credentials.gemini]
+api_key = "CHANGEME"
+
+[credentials.zhipu]
+# 智谱GLM的大模型配置 (因为兼容OpenAI协议，代码底层走的是 ChatOpenAI)
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key = "CHANGEME"
+
+[credentials.custom_openai]
+# 适用于任意提供OpenAI兼容协议的厂商 (例如各大API中转代理)
+base_url = "https://api.your-proxy.com/v1"
 api_key = "CHANGEME"
 
 [gitlab]
