@@ -7,6 +7,7 @@ import {
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import DiffViewer from './DiffViewer';
 
 // API 配置 (前端端口是5173，后端如果是8000，则设置baseURL)
 const api = axios.create({
@@ -17,10 +18,11 @@ function App() {
   const [activeTab, setActiveTab] = useState('review');
   const [mrUrl, setMrUrl] = useState('');
   const [parsedMR, setParsedMR] = useState(null);
+  const [mrData, setMrData] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState(null);
   
-  const [reviewReport, setReviewReport] = useState(null);
+  const [aiComments, setAiComments] = useState([]);
   const [statusMessage, setStatusMessage] = useState('');
 
   const [config, setConfig] = useState({
@@ -50,11 +52,24 @@ function App() {
 
     setIsSubmitting(true);
     setMessage(null);
-    setReviewReport('');
-    setStatusMessage('分析合并请求地址并请求后端...');
+    setAiComments([]);
+    setMrData(null);
+    setStatusMessage('分析合并请求地址并请求 MR Diff 数据...');
     
     try {
-      const response = await fetch('http://localhost:8000/api/review/stream', {
+      // 1. 获取 diff 数据
+      const diffResp = await fetch('http://localhost:8000/api/mr/diff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: mrUrl }),
+      });
+      if (!diffResp.ok) throw new Error(`HTTP error! status: ${diffResp.status}`);
+      const diffInfo = await diffResp.json();
+      setMrData({ ...diffInfo, url: mrUrl });
+
+      // 2. 触发流式审查
+      setStatusMessage('正在由大语言模型逐行扫描代码...');
+      const response = await fetch('http://localhost:8000/api/review/structured_stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: mrUrl }),
@@ -67,6 +82,8 @@ function App() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       
+      let pendingBuffer = '';
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -80,13 +97,25 @@ function App() {
             try {
               const data = JSON.parse(dataStr);
               if (data.status === 'streaming') {
-                setReviewReport(prev => (prev || '') + data.chunk);
-                setStatusMessage('大语言模型正在深度分析代码中...');
+                 // accumulated buffer for json lines
+                 pendingBuffer += data.chunk;
+                 const jsonLines = pendingBuffer.split(/\r?\n/);
+                 // keep the last potentially incomplete line in buffer
+                 pendingBuffer = jsonLines.pop(); 
+                 
+                 for (const jLine of jsonLines) {
+                     if (!jLine.trim()) continue;
+                     try {
+                        const parsedObj = JSON.parse(jLine);
+                        if (parsedObj.new_path && (parsedObj.line || parsedObj.new_line)) {
+                           // add valid comment to state
+                           setAiComments(prev => [...prev, parsedObj]);
+                        }
+                     } catch(e) { } // ignore incomplete json line parser errors
+                 }
+                 setStatusMessage('大语言模型正在深度分析代码中...');
               } else if (data.status === 'info') {
                 setStatusMessage(data.message);
-                if (data.message.includes('✅')) {
-                   setReviewReport(prev => (prev || '') + data.message);
-                }
               } else if (data.status === 'error') {
                 setMessage({ type: 'error', text: data.message });
                 setIsSubmitting(false);
@@ -101,6 +130,14 @@ function App() {
             }
           }
         }
+      }
+      
+      // flush remaining buffer
+      if (pendingBuffer.trim()) {
+         try {
+            const parsedObj = JSON.parse(pendingBuffer);
+            if (parsedObj.new_path) setAiComments(prev => [...prev, parsedObj]);
+         } catch(e) {}
       }
     } catch (error) {
       setMessage({ type: 'error', text: '网络请求失败，请确保后端服务 (8000) 正在运行。' });
@@ -153,7 +190,7 @@ function App() {
       </div>
 
       {/* Main Content Area */}
-      <main className="w-full max-w-4xl">
+      <main className="w-full max-w-6xl">
         {message && (
           <div className={`mb-6 p-4 rounded-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-4 ${message.type === 'success' ? 'bg-green-50 text-green-800 border border-green-100' : 'bg-red-50 text-red-800 border border-red-100'}`}>
             <CheckCircle2 size={20} />
@@ -169,7 +206,7 @@ function App() {
                 <p className="text-gray-500 text-sm">黏贴 GitLab URL，无需繁琐人工操作，后端直连自动拉取 Diff 分析并回评</p>
               </div>
 
-              {isSubmitting || reviewReport ? (
+              {isSubmitting || mrData ? (
                 <div className="max-w-xl mx-auto flex flex-col sm:flex-row items-center justify-between bg-white shadow-sm p-4 rounded-2xl border border-gray-100 gap-4 transition-all animate-in fade-in zoom-in duration-300">
                    <div className="flex items-center gap-3 w-full">
                       <div className="flex-shrink-0 w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-appleBlue">
@@ -217,11 +254,11 @@ function App() {
               )}
             </div>
 
-            {(statusMessage || reviewReport || isSubmitting) && (
-              <div className="mt-8 pt-4 max-w-2xl mx-auto text-left animate-in fade-in slide-in-from-bottom-4 duration-500">
-                <div className="flex items-center justify-between mb-4 px-2">
+            {(statusMessage || mrData || isSubmitting) && (
+              <div className="mt-8 pt-4 w-full text-left animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="flex items-center justify-between mb-4 px-2 max-w-2xl mx-auto">
                    <h3 className="text-xl font-semibold flex items-center gap-2 text-appleGray-800">
-                     <span className="text-2xl">🤖</span> AI 实时审查报告
+                     <span className="text-2xl">🤖</span> AI 智能代码视图
                    </h3>
                    {statusMessage && (
                      <div className="flex items-center gap-2 text-sm text-appleBlue font-medium bg-blue-50 px-3 py-1.5 rounded-full animate-pulse">
@@ -231,28 +268,27 @@ function App() {
                    )}
                 </div>
                 
-                <div className="relative overflow-hidden group">
-                  <div className="absolute inset-0 bg-gradient-to-tr from-blue-50/50 to-white pointer-events-none rounded-3xl" />
-                  <div className="relative z-10 text-[15px] text-gray-700 bg-white/60 backdrop-blur-sm shadow-sm p-6 sm:p-8 rounded-3xl border border-gray-100 min-h-[160px]">
-                     {reviewReport ? (
-                       <div className="prose prose-sm md:prose-base max-w-none prose-blue">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                             {reviewReport}
-                          </ReactMarkdown>
+                <div className="w-full">
+                   {mrData ? (
+                      <DiffViewer 
+                        mrData={mrData} 
+                        aiComments={aiComments} 
+                        onDeleteComment={(comment) => setAiComments(prev => prev.filter(c => c !== comment))}
+                      />
+                   ) : (
+                     <div className="relative overflow-hidden group max-w-2xl mx-auto">
+                       <div className="absolute inset-0 bg-gradient-to-tr from-blue-50/50 to-white pointer-events-none rounded-3xl" />
+                       <div className="relative z-10 text-[15px] text-gray-700 bg-white/60 backdrop-blur-sm shadow-sm p-6 sm:p-8 rounded-3xl border border-gray-100 min-h-[160px]">
+                           <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-3 py-10">
+                              <div className="w-8 h-8 relative">
+                                 <div className="absolute inset-0 rounded-full border-2 border-gray-200"></div>
+                                 <div className="absolute inset-0 rounded-full border-2 border-appleBlue border-t-transparent animate-spin"></div>
+                              </div>
+                              <span>正在拉取代码差异...</span>
+                           </div>
                        </div>
-                     ) : (
-                       <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-3 py-10">
-                          <div className="w-8 h-8 relative">
-                             <div className="absolute inset-0 rounded-full border-2 border-gray-200"></div>
-                             <div className="absolute inset-0 rounded-full border-2 border-appleBlue border-t-transparent animate-spin"></div>
-                          </div>
-                          <span>正在准备输出内容...</span>
-                       </div>
-                     )}
-                     {isSubmitting && reviewReport && (
-                        <span className="inline-block ml-1 w-1.5 h-[1.1em] align-middle bg-appleBlue animate-pulse"></span>
-                     )}
-                  </div>
+                     </div>
+                   )}
                 </div>
               </div>
             )}

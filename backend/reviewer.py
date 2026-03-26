@@ -99,3 +99,26 @@ def review_code_diff_stream(diff_content: str):
     
     for chunk in chain.stream({"diff_content": diff_content}):
         yield chunk.content
+
+def review_code_diff_structured(diff_content: str):
+    """使用大语言模型审核代码的差异（流式输出 JSON Lines）"""
+    config = load_config()
+    llm = get_llm()
+    system_rules = config.get("rules", {}).get("default_prompt", "你是一个代码审查专家。")
+    
+    json_instruction = (
+        "\\n请你逐条指出代码中的问题，并必须以 JSON Lines 的格式输出。每一行必须是一个纯净且规范的 JSON 对象，包含如下格式：\\n"
+        '{"new_path": "文件路径", "new_line": 具体发生问题的行号(必须是整数), "comment": "问题描述与修改建议"}\\n'
+        "请注意，遇到多行代码建议合并处理，指定为其中某一行号即可。不要输出任何其他文本内容（绝对不要附带 ```json 等 Markdown 标签）。"
+    )
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_rules + json_instruction),
+        ("human", "以下是代码的 diff 记录（包含变更路径和具体增删内容）：\n\n{diff_content}")
+    ])
+    
+    chain = prompt | llm
+    
+    for chunk in chain.stream({"diff_content": diff_content}):
+        yield chunk.content
+

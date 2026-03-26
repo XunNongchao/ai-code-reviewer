@@ -8,7 +8,7 @@ import json
 import httpx
 import re
 from urllib.parse import quote
-from reviewer import load_config, save_config, review_code_diff, review_code_diff_stream
+from reviewer import load_config, save_config, review_code_diff, review_code_diff_stream, review_code_diff_structured
 
 app = FastAPI(title="LLM Code Review Agent", version="1.0.0")
 
@@ -30,6 +30,17 @@ class ConfigUpdateRequest(BaseModel):
 
 class UrlReviewRequest(BaseModel):
     url: str
+
+class PublishNoteRequest(BaseModel):
+    url: str
+    new_path: str
+    old_path: str | None = None
+    new_line: int
+    comment: str
+    base_sha: str
+    head_sha: str
+    start_sha: str
+
 
 def execute_review_task(project_id: str | int, mr_iid: int):
     """后台执行实际审核任务，完成后发送评论到对应的 MR"""
@@ -192,6 +203,165 @@ def trigger_review_stream(req: UrlReviewRequest):
             yield f"data: {json.dumps({'status': 'error', 'message': f'执行异常: {str(e)}'})}\n\n"
 
     return StreamingResponse(generate_response(), media_type="text/event-stream")
+
+@app.post("/api/mr/diff")
+def get_mr_diff(req: UrlReviewRequest):
+    """获取 MR 的 Diff 数据和基本信息以便前端展示"""
+    try:
+        url = req.url.strip()
+        match = re.match(r"^(https?://[^/]+)/(.+?)/-/merge_requests/(\d+)", url)
+        if not match:
+            raise HTTPException(status_code=400, detail="无效的 GitLab MR URL 格式。")
+            
+        base_url_from_url = match.group(1)
+        project_path = match.group(2)
+        mr_iid = match.group(3)
+        
+        config = load_config()
+        gl_config = config.get("gitlab", {})
+        token = gl_config.get("private_token", "")
+        base_url = gl_config.get("url", base_url_from_url).rstrip("/")
+        
+        if not token or token == "CHANGEME":
+            raise HTTPException(status_code=400, detail="未配置正确的 GitLab Private Token")
+            
+        encoded_project_id = quote(project_path, safe='')
+        headers = {"PRIVATE-TOKEN": token}
+        
+        # 获取 MR 信息（包含了 diff_refs）
+        mr_api_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}"
+        resp_mr = httpx.get(mr_api_url, headers=headers, timeout=30.0)
+        resp_mr.raise_for_status()
+        mr_info = resp_mr.json()
+        
+        # 获取 MR Changes (diffs)
+        changes_api_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}/changes"
+        resp_changes = httpx.get(changes_api_url, headers=headers, timeout=30.0)
+        resp_changes.raise_for_status()
+        changes_info = resp_changes.json()
+        
+        return {
+            "project_id": project_path,
+            "mr_iid": mr_iid,
+            "diff_refs": mr_info.get("diff_refs"),
+            "changes": changes_info.get("changes", [])
+        }
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=f"GitLab API 请求失败: {exc.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取 MR 数据失败: {str(e)}")
+
+@app.post("/api/review/structured_stream")
+def trigger_review_structured_stream(req: UrlReviewRequest):
+    """流式返回代码审查结果，输出为 JSON Lines，基于前端拉取的同一 MR URL"""
+    def generate_response():
+        try:
+            url = req.url.strip()
+            match = re.match(r"^(https?://[^/]+)/(.+?)/-/merge_requests/(\d+)", url)
+            if not match:
+                yield f"data: {json.dumps({'status': 'error', 'message': '无效的 GitLab MR URL 格式。'})}\n\n"
+                return
+                
+            base_url_from_url = match.group(1)
+            project_path = match.group(2)
+            mr_iid = match.group(3)
+            
+            config = load_config()
+            gl_config = config.get("gitlab", {})
+            token = gl_config.get("private_token", "")
+            base_url = gl_config.get("url", base_url_from_url).rstrip("/")
+            
+            if not token or token == "CHANGEME":
+                yield f"data: {json.dumps({'status': 'error', 'message': '未配置正确的 GitLab Private Token'})}\n\n"
+                return
+                
+            encoded_project_id = quote(project_path, safe='')
+            api_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}/changes"
+            headers = {"PRIVATE-TOKEN": token}
+            
+            resp = httpx.get(api_url, headers=headers, timeout=30.0)
+            resp.raise_for_status()
+            mr_data = resp.json()
+            
+            diff_texts = []
+            for change in mr_data.get("changes", []):
+                new_path = change.get("new_path")
+                old_path = change.get("old_path")
+                diff = change.get("diff")
+                diff_texts.append(f"旧路径: {old_path}\n新路径: {new_path}\n变更内容:\n{diff}")
+                
+            full_diff_text = "\n---\n".join(diff_texts)
+            if not full_diff_text.strip():
+                yield f"data: {json.dumps({'status': 'error', 'message': '该 MR 未包含任何有效代码变更！'})}\n\n"
+                return
+            
+            # 流式审查，直接回传原始 chunk
+            for chunk in review_code_diff_structured(full_diff_text):
+                yield f"data: {json.dumps({'status': 'streaming', 'chunk': chunk})}\n\n"
+                
+            yield f"data: {json.dumps({'status': 'done', 'message': '审查完成'})}\n\n"
+            
+        except httpx.HTTPStatusError as exc:
+            yield f"data: {json.dumps({'status': 'error', 'message': f'GitLab API 请求失败: HTTP {exc.response.status_code}'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'status': 'error', 'message': f'执行异常: {str(e)}'})}\n\n"
+
+    return StreamingResponse(generate_response(), media_type="text/event-stream")
+
+@app.post("/api/mr/publish_note")
+def publish_draft_note(req: PublishNoteRequest):
+    """创建评论草稿并立刻发布"""
+    try:
+        url = req.url.strip()
+        match = re.match(r"^(https?://[^/]+)/(.+?)/-/merge_requests/(\d+)", url)
+        if not match:
+            raise HTTPException(status_code=400, detail="无效的 GitLab MR URL 格式。")
+            
+        base_url_from_url = match.group(1)
+        project_path = match.group(2)
+        mr_iid = match.group(3)
+        
+        config = load_config()
+        gl_config = config.get("gitlab", {})
+        token = gl_config.get("private_token", "")
+        base_url = gl_config.get("url", base_url_from_url).rstrip("/")
+        
+        encoded_project_id = quote(project_path, safe='')
+        headers = {"PRIVATE-TOKEN": token}
+        
+        # 1. 创建 Draft Note
+        draft_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}/draft_notes"
+        draft_payload = {
+            "note": req.comment,
+            "position": {
+                "position_type": "text",
+                "base_sha": req.base_sha,
+                "head_sha": req.head_sha,
+                "start_sha": req.start_sha,
+                "new_path": req.new_path,
+                "old_path": req.old_path or req.new_path,
+                "new_line": req.new_line
+            }
+        }
+        
+        resp_draft = httpx.post(draft_url, headers=headers, json=draft_payload, timeout=30.0)
+        resp_draft.raise_for_status()
+        draft_data = resp_draft.json()
+        draft_id = draft_data.get("id")
+        
+        if not draft_id:
+            raise Exception("未能成功创建 Draft Note，未返回 ID")
+            
+        # 2. 发布 Draft Note
+        publish_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}/draft_notes/{draft_id}/publish"
+        resp_publish = httpx.put(publish_url, headers=headers, timeout=30.0)
+        resp_publish.raise_for_status()
+        
+        return {"message": "评论应用成功"}
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=exc.response.status_code, detail=f"GitLab API Error: {exc.response.text}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/review")
 def trigger_review(req: ReviewRequest, background_tasks: BackgroundTasks):
