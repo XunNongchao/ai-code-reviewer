@@ -192,13 +192,12 @@ function App() {
                        <span>GitLab Merge Request 地址</span>
                     </label>
                     <div className="relative">
-                      <Link className="absolute left-4 top-3.5 text-gray-400" size={18} />
                       <input 
                         type="url" 
                         value={mrUrl}
                         onChange={(e) => setMrUrl(e.target.value)}
                         placeholder="例：https://gitlab.../-/merge_requests/3122" 
-                        className="apple-input pl-11"
+                        className="apple-input"
                         required
                       />
                     </div>
@@ -289,10 +288,9 @@ function App() {
                   <div>
                      <label className="block text-sm font-medium text-gray-600 mb-2 ml-1">接口地址 (Base URL)</label>
                      <div className="relative">
-                        <Link className="absolute left-4 top-3.5 text-gray-400" size={16} />
                         <input 
                           type="text" 
-                          className="apple-input pl-11" 
+                          className="apple-input" 
                           value={config.llm_config?.base_url || ''}
                           onChange={(e) => setConfig({
                             ...config, 
