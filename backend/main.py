@@ -35,7 +35,8 @@ class PublishNoteRequest(BaseModel):
     url: str
     new_path: str
     old_path: str | None = None
-    new_line: int
+    new_line: int | None = None
+    old_line: int | None = None
     comment: str
     base_sha: str
     head_sha: str
@@ -329,10 +330,10 @@ def publish_draft_note(req: PublishNoteRequest):
         encoded_project_id = quote(project_path, safe='')
         headers = {"PRIVATE-TOKEN": token}
         
-        # 1. 创建 Draft Note
-        draft_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}/draft_notes"
-        draft_payload = {
-            "note": req.comment,
+        # 直接使用 discussions API 进行行内评论以避免某些 GitLab 版本对 draft_notes 的支持问题 (404)
+        discussion_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}/discussions"
+        discussion_payload = {
+            "body": req.comment,
             "position": {
                 "position_type": "text",
                 "base_sha": req.base_sha,
@@ -340,22 +341,13 @@ def publish_draft_note(req: PublishNoteRequest):
                 "start_sha": req.start_sha,
                 "new_path": req.new_path,
                 "old_path": req.old_path or req.new_path,
-                "new_line": req.new_line
+                "new_line": req.new_line,
+                "old_line": req.old_line
             }
         }
         
-        resp_draft = httpx.post(draft_url, headers=headers, json=draft_payload, timeout=30.0)
-        resp_draft.raise_for_status()
-        draft_data = resp_draft.json()
-        draft_id = draft_data.get("id")
-        
-        if not draft_id:
-            raise Exception("未能成功创建 Draft Note，未返回 ID")
-            
-        # 2. 发布 Draft Note
-        publish_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}/draft_notes/{draft_id}/publish"
-        resp_publish = httpx.put(publish_url, headers=headers, timeout=30.0)
-        resp_publish.raise_for_status()
+        resp_discussion = httpx.post(discussion_url, headers=headers, json=discussion_payload, timeout=30.0)
+        resp_discussion.raise_for_status()
         
         return {"message": "评论应用成功"}
     except httpx.HTTPStatusError as exc:

@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { 
   Settings, FileCode2, Play, GitMerge, 
-  CheckCircle2, ShieldAlert, Key, Link
+  CheckCircle2, ShieldAlert, Key, Link,
+  ArrowUp, ChevronDown, ChevronUp
 } from 'lucide-react';
 
 import ReactMarkdown from 'react-markdown';
@@ -30,6 +31,34 @@ function App() {
     rules: { default_prompt: '' },
     gitlab: { url: '', private_token: '' }
   });
+
+  const scrollToNextSuggestion = () => {
+    const els = document.querySelectorAll('.ai-suggestion-box');
+    if (!els.length) return;
+    for (let el of els) {
+      const rect = el.getBoundingClientRect();
+      if (rect.top > 120) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+    }
+  };
+
+  const scrollToPrevSuggestion = () => {
+    const els = Array.from(document.querySelectorAll('.ai-suggestion-box')).reverse();
+    if (!els.length) return;
+    for (let el of els) {
+      const rect = el.getBoundingClientRect();
+      if (rect.top < -10) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+    }
+  };
+
+  const scrollToTop = () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   // 获取配置
   useEffect(() => {
@@ -435,6 +464,23 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Floating navigation buttons */}
+      <div className="fixed bottom-8 right-8 flex flex-col gap-3 z-50">
+         {(aiComments.length > 0) && (
+           <>
+             <button onClick={scrollToPrevSuggestion} className="w-12 h-12 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center animate-in fade-in slide-in-from-bottom-4 transition-all" title="上一个审查点">
+                <ChevronUp size={24} />
+             </button>
+             <button onClick={scrollToNextSuggestion} className="w-12 h-12 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center animate-in fade-in slide-in-from-bottom-4 transition-all" title="下一个审查点">
+                <ChevronDown size={24} />
+             </button>
+           </>
+         )}
+         <button onClick={scrollToTop} className="w-12 h-12 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center transition-all hover:scale-105 active:scale-95" title="回到顶部">
+            <ArrowUp size={24} />
+         </button>
+      </div>
 
     </div>
   );

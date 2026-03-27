@@ -4,7 +4,7 @@ import { Play, CheckCircle2, FileCode2, MessagesSquare } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-function CommentBox({ commentData, fileInfo, diffRefs, mrData, onApply, onDelete }) {
+function CommentBox({ commentData, fileInfo, diffRefs, mrData, row, onApply, onDelete }) {
   const [text, setText] = useState(commentData.comment);
   const [status, setStatus] = useState('idle'); // idle, loading, success, error
 
@@ -18,7 +18,8 @@ function CommentBox({ commentData, fileInfo, diffRefs, mrData, onApply, onDelete
           url: mrData.url,
           new_path: fileInfo.new_path,
           old_path: fileInfo.old_path,
-          new_line: commentData.new_line || commentData.line,
+          new_line: row ? (row.right ? (row.right.ln || row.right.ln2) : null) : (commentData.new_line || commentData.line),
+          old_line: row ? (row.left ? (row.left.ln || row.left.ln1) : null) : null,
           comment: text,
           base_sha: diffRefs.base_sha,
           head_sha: diffRefs.head_sha,
@@ -36,7 +37,7 @@ function CommentBox({ commentData, fileInfo, diffRefs, mrData, onApply, onDelete
   };
 
   return (
-    <div className="bg-white border text-sm rounded-xl p-4 shadow-sm my-2 ml-4 mr-4 animate-in fade-in slide-in-from-top-2">
+    <div className="bg-white border border-blue-200 shadow-[0_2px_8px_-3px_rgba(59,130,246,0.3)] text-sm rounded-xl p-3 animate-in fade-in slide-in-from-top-2">
       <div className="flex items-center gap-2 text-appleBlue font-medium mb-3">
         <MessagesSquare size={16} /> AI 审查建议
       </div>
@@ -84,6 +85,7 @@ export default function DiffViewer({ mrData, aiComments, onDeleteComment }) {
           const pathMatch = (c.new_path === change.new_path) || (c.file === change.new_path);
           return pathMatch;
         });
+        const fileHasComments = fileComments.length > 0;
 
         // Compute rows per chunk
         return (
@@ -115,12 +117,17 @@ export default function DiffViewer({ mrData, aiComments, onDeleteComment }) {
               pendingDel.forEach(d => rows.push({ left: d, right: null }));
 
               return (
-                <div key={cIdx} className="w-full text-[13px] font-mono leading-relaxed border-b border-gray-100 last:border-0 relative">
+                <div key={cIdx} className="w-full text-[13px] font-mono leading-relaxed border-b border-gray-100 last:border-0 relative flex flex-col">
                   {/* Hunk Header */}
-                  <div className="w-full flex bg-blue-50/50 text-blue-400 select-none">
-                     <div className="w-12 text-center py-1 opacity-60">...</div>
-                     <div className="w-12 text-center py-1 opacity-60 border-l border-blue-50">...</div>
-                     <div className="flex-1 px-4 py-1.5 opacity-80">{chunk.content}</div>
+                  <div className="w-full flex">
+                    <div className={`flex ${fileHasComments ? 'w-[70%] border-r border-gray-200' : 'w-full'} bg-blue-50/50 text-blue-400 select-none`}>
+                       <div className="w-12 shrink-0 text-center py-1 opacity-60">...</div>
+                       <div className="w-12 shrink-0 text-center py-1 opacity-60 border-l border-blue-50">...</div>
+                       <div className="flex-1 px-4 py-1.5 opacity-80">{chunk.content}</div>
+                    </div>
+                    {fileHasComments && (
+                       <div className="w-[30%] bg-gray-50 border-b border-gray-100"></div>
+                    )}
                   </div>
 
                   {rows.map((row, rIdx) => {
@@ -133,15 +140,15 @@ export default function DiffViewer({ mrData, aiComments, onDeleteComment }) {
                      }) : [];
 
                      return (
-                        <div key={rIdx} className="flex flex-col group/row hover:bg-gray-50/50">
+                        <div key={rIdx} className="flex flex-row w-full group/row hover:bg-gray-50/50">
                           {/* Code Row */}
-                          <div className="flex w-full min-w-full">
+                          <div className={`flex min-w-0 border-b border-gray-50/50 ${fileHasComments ? 'w-[70%] border-r border-gray-200' : 'w-full'}`}>
                             {/* Left Side */}
                             <div className={`flex w-1/2 border-r border-gray-100 ${row.left ? (row.left.type === 'del' ? 'bg-red-50/70' : '') : 'bg-gray-50/30'}`}>
                               <div className="w-12 shrink-0 py-0.5 px-2 text-right text-gray-400 select-none border-r border-gray-200 bg-gray-50/60">
                                 {row.left ? (row.left.ln || row.left.ln1) : '\u00A0'}
                               </div>
-                              <div className={`flex-1 py-0.5 px-4 whitespace-pre-wrap ${row.left?.type === 'del' ? 'text-red-800' : 'text-gray-700'}`}>
+                              <div className={`flex-1 py-0.5 px-4 whitespace-pre-wrap break-all overflow-hidden ${row.left?.type === 'del' ? 'text-red-800' : 'text-gray-700'}`}>
                                 {row.left?.content ? row.left.content.substring(1) : ''}
                               </div>
                             </div>
@@ -153,25 +160,31 @@ export default function DiffViewer({ mrData, aiComments, onDeleteComment }) {
                               >
                                 {rightLine || '\u00A0'}
                               </div>
-                              <div className={`flex-1 py-0.5 px-4 whitespace-pre-wrap ${row.right?.type === 'add' ? 'text-green-800' : 'text-gray-700'}`}>
+                              <div className={`flex-1 py-0.5 px-4 whitespace-pre-wrap break-all overflow-hidden ${row.right?.type === 'add' ? 'text-green-800' : 'text-gray-700'}`}>
                                 {row.right?.content ? row.right.content.substring(1) : ''}
                               </div>
                             </div>
                           </div>
 
-                          {/* AI Comments under the row */}
-                          {lineComments.length > 0 && (
-                             <div className="col-span-full border-t border-b border-gray-200 bg-gray-50 relative pb-2 pt-1">
-                                {lineComments.map((commentData, cIdx) => (
-                                  <CommentBox 
-                                    key={cIdx} 
-                                    commentData={commentData} 
-                                    fileInfo={change}
-                                    diffRefs={diffRefs} 
-                                    mrData={mrData}
-                                    onDelete={() => onDeleteComment(commentData)}
-                                  />
-                                ))}
+                          {/* AI Comments side for this specific row */}
+                          {fileHasComments && (
+                             <div className="w-[30%] bg-gray-50 min-w-0 relative border-b border-gray-100/50 flex flex-col justify-center">
+                               {lineComments.length > 0 && (
+                                  <div className="p-2 flex flex-col gap-2 relative z-10 ai-suggestion-box">
+                                     {lineComments.map((commentData, cIdx) => (
+                                        <div key={cIdx}>
+                                           <CommentBox 
+                                             commentData={commentData} 
+                                             fileInfo={change}
+                                             diffRefs={diffRefs} 
+                                             mrData={mrData}
+                                             row={row}
+                                             onDelete={() => onDeleteComment(commentData)}
+                                           />
+                                        </div>
+                                     ))}
+                                  </div>
+                               )}
                              </div>
                           )}
                         </div>
