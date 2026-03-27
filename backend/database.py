@@ -232,7 +232,14 @@ class ProjectRepository(BaseRepository):
                 (project_path, kwargs.get('gitlab_project_id'),
                  kwargs.get('name'), kwargs.get('web_url'))
             )
-            return self.find_by_id(cursor.lastrowid)
+            last_id = cursor.lastrowid
+            if not last_id:
+                raise RuntimeError(f"Failed to insert project: {project_path}")
+
+        result = self.find_by_id(last_id)
+        if not result:
+            raise RuntimeError(f"Failed to find inserted project with id: {last_id}")
+        return result
 
 
 class MergeRequestRepository(BaseRepository):
@@ -272,7 +279,14 @@ class MergeRequestRepository(BaseRepository):
                  kwargs.get('web_url'), kwargs.get('base_sha'),
                  kwargs.get('head_sha'), kwargs.get('start_sha'))
             )
-            return self.find_by_id(cursor.lastrowid)
+            last_id = cursor.lastrowid
+            if not last_id:
+                raise RuntimeError(f"Failed to insert MR: project_id={project_id}, mr_iid={mr_iid}")
+
+        result = self.find_by_id(last_id)
+        if not result:
+            raise RuntimeError(f"Failed to find inserted MR with id: {last_id}")
+        return result
 
     def _update_shas(self, mr_id: int, **kwargs):
         """Update MR SHA references"""
@@ -320,7 +334,14 @@ class ReviewSessionRepository(BaseRepository):
                    VALUES (?, ?, 'pending', ?, ?, ?, ?)""",
                 (mr_id, session_uuid, provider, model_name, prompt_used, diff_content)
             )
-            return self.find_by_id(cursor.lastrowid)
+            last_id = cursor.lastrowid
+            if not last_id:
+                raise RuntimeError(f"Failed to insert review session for mr_id: {mr_id}")
+
+        result = self.find_by_id(last_id)
+        if not result:
+            raise RuntimeError(f"Failed to find inserted session with id: {last_id}")
+        return result
 
     def update_status(self, session_id: int, status: str,
                       full_report: str = None, error_message: str = None):
