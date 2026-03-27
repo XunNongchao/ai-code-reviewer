@@ -37,6 +37,9 @@ source venv/bin/activate
 # 安装依赖
 pip install -r requirements.txt
 
+# 初始化数据库
+python migration.py
+
 # 启动服务 (默认端口 8000)
 uvicorn main:app --reload --port 8000
 ```

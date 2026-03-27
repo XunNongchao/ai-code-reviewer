@@ -33,6 +33,8 @@ function App() {
   // 批量审查相关状态
   const [batchMode, setBatchMode] = useState(false);           // 是否批量模式
   const [currentMRIndex, setCurrentMRIndex] = useState(0);     // 当前查看的 MR 索引
+  const [batchResults, setBatchResults] = useState([]);
+  const [reviewProgress, setReviewProgress] = useState({ current: 0, total: 0 });
 
   // 历史记录相关状态
   const [historyList, setHistoryList] = useState([]);
@@ -346,12 +348,14 @@ function App() {
 
     if (batchMode) {
       // 批量模式：逐个审查
+      let successCount = 0;
       for (let i = 0; i < parsedMRs.length; i++) {
         setCurrentMRIndex(i);
         setReviewProgress({ current: i + 1, total: parsedMRs.length });
         setStatusMessage(`正在审查第 ${i + 1}/${parsedMRs.length} 个 MR: ${parsedMRs[i].projectPath} !${parsedMRs[i].mrIid}`);
 
         const result = await reviewSingleMR(parsedMRs[i], i);
+        if (result.success) successCount++;
         setBatchResults(prev => [...prev, result]);
 
         // 每个审查完成后短暂暂停，避免 API 限流
@@ -360,7 +364,6 @@ function App() {
         }
       }
 
-      const successCount = parsedMRs.filter(mr => mr.status === 'completed').length;
       setMessage({
         type: successCount === parsedMRs.length ? 'success' : 'warning',
         text: `批量审查完成：${successCount}/${parsedMRs.length} 个 MR 审查成功`
@@ -1034,18 +1037,21 @@ function App() {
 
       {/* Floating navigation buttons */}
       <div className="fixed bottom-8 right-8 flex flex-col gap-3 z-50">
-         {(aiComments.length > 0) && (
+         {((batchMode && parsedMRs[currentMRIndex]?.aiComments?.length > 0) || (!batchMode && aiComments.length > 0)) && (
            <>
-             <button onClick={scrollToPrevSuggestion} className="w-12 h-12 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center animate-in fade-in slide-in-from-bottom-4 transition-all" title="上一个审查点">
-                <ChevronUp size={24} />
+             <button onClick={scrollToPrevSuggestion} className="px-5 h-12 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center gap-2 animate-in fade-in slide-in-from-bottom-4 transition-all hover:scale-105 active:scale-95" title="上一个审查点">
+                <ChevronUp size={20} />
+                <span className="text-sm font-medium pr-1">上一处审查</span>
              </button>
-             <button onClick={scrollToNextSuggestion} className="w-12 h-12 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center animate-in fade-in slide-in-from-bottom-4 transition-all" title="下一个审查点">
-                <ChevronDown size={24} />
+             <button onClick={scrollToNextSuggestion} className="px-5 h-12 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center gap-2 animate-in fade-in slide-in-from-bottom-4 transition-all hover:scale-105 active:scale-95" title="下一个审查点">
+                <ChevronDown size={20} />
+                <span className="text-sm font-medium pr-1">下一处审查</span>
              </button>
            </>
          )}
-         <button onClick={scrollToTop} className="w-12 h-12 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center transition-all hover:scale-105 active:scale-95" title="回到顶部">
-            <ArrowUp size={24} />
+         <button onClick={scrollToTop} className="px-5 h-12 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center gap-2 transition-all hover:scale-105 active:scale-95" title="回到顶部">
+            <ArrowUp size={20} />
+            <span className="text-sm font-medium pr-1">回到顶部</span>
          </button>
       </div>
 

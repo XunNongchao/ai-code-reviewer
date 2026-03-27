@@ -10,7 +10,10 @@ ENV/
 
 # Project Specific
 backend/config.toml
-backend/data/              # SQLite database and WAL files
+backend/data/
+*.db
+*.db-shm
+*.db-wal
 
 # IDE
 .idea/
