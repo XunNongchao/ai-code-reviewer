@@ -1,17 +1,22 @@
 import React, { useState } from 'react';
 import parseDiff from 'parse-diff';
-import { Play, CheckCircle2, FileCode2, MessagesSquare } from 'lucide-react';
+import { Play, CheckCircle2, FileCode2, MessagesSquare, CheckCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 // API 基础地址 - 动态获取，支持局域网访问
 const API_BASE = `http://${window.location.hostname}:8000`;
 
-function CommentBox({ commentData, fileInfo, diffRefs, mrData, row, onApply, onDelete }) {
-  const [text, setText] = useState(commentData.comment);
+function CommentBox({ commentData, fileInfo, diffRefs, mrData, row, onApply, onDelete, onPublished }) {
+  const [text, setText] = useState(commentData.comment || commentData.comment_text);
   const [status, setStatus] = useState('idle'); // idle, loading, success, error
+  // 检查是否已发布（从数据库加载的评论有 gitlab_published 字段）
+  const isPublished = commentData.gitlab_published === true || commentData.gitlab_published === 1;
 
   const handleApply = async () => {
+    // 如果已发布，不允许再次应用
+    if (isPublished || status === 'success') return;
+
     setStatus('loading');
     try {
       const resp = await fetch(`${API_BASE}/api/mr/publish_note`, {
@@ -26,42 +31,56 @@ function CommentBox({ commentData, fileInfo, diffRefs, mrData, row, onApply, onD
           comment: text,
           base_sha: diffRefs.base_sha,
           head_sha: diffRefs.head_sha,
-          start_sha: diffRefs.start_sha
+          start_sha: diffRefs.start_sha,
+          comment_id: commentData.id  // 传递评论 ID 以便更新发布状态
         })
       });
       if (!resp.ok) throw new Error('API Error');
       setStatus('success');
-      setTimeout(() => setStatus('idle'), 3000);
+      // 不再重置状态，保持已发布状态
       if (onApply) onApply();
+      if (onPublished) onPublished();  // 通知父组件更新状态
     } catch (e) {
       console.error(e);
       setStatus('error');
     }
   };
 
+  // 如果已发布，显示只读状态
+  if (isPublished || status === 'success') {
+    return (
+      <div className="bg-green-50 border border-green-200 text-sm rounded-xl p-3">
+        <div className="flex items-center gap-2 text-green-700 font-medium mb-2">
+          <CheckCircle size={16} /> 已发布到 GitLab
+        </div>
+        <div className="text-gray-700 whitespace-pre-wrap">{text}</div>
+      </div>
+    );
+  }
+
   return (
     <div className="bg-white border border-blue-200 shadow-[0_2px_8px_-3px_rgba(59,130,246,0.3)] text-sm rounded-xl p-3 animate-in fade-in slide-in-from-top-2">
       <div className="flex items-center gap-2 text-appleBlue font-medium mb-3">
         <MessagesSquare size={16} /> AI 审查建议
       </div>
-      <textarea 
-        className="w-full text-sm apple-input min-h-[80px]" 
-        value={text} 
+      <textarea
+        className="w-full text-sm apple-input min-h-[80px]"
+        value={text}
         onChange={e => setText(e.target.value)}
       />
       <div className="mt-3 flex gap-2 justify-end">
-        <button 
-          onClick={onDelete} 
+        <button
+          onClick={onDelete}
           className="px-4 py-2 text-gray-500 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors font-medium text-sm"
         >
           忽略 / 删除
         </button>
-        <button 
-          onClick={handleApply} 
+        <button
+          onClick={handleApply}
           disabled={status === 'loading'}
           className="flex items-center gap-2 bg-black text-white px-5 py-2 rounded-lg font-medium shadow-sm hover:shadow active:scale-95 transition-all text-sm disabled:opacity-50"
         >
-          {status === 'loading' ? '提交中...' : status === 'success' ? <><CheckCircle2 size={16}/>已应用至GitLab</> : '应用此建议'}
+          {status === 'loading' ? '提交中...' : '应用此建议'}
         </button>
       </div>
     </div>

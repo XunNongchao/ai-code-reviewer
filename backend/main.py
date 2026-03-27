@@ -53,6 +53,11 @@ class PublishNoteRequest(BaseModel):
     base_sha: str
     head_sha: str
     start_sha: str
+    comment_id: int | None = None  # 可选：用于更新发布状态
+    comment: str
+    base_sha: str
+    head_sha: str
+    start_sha: str
 
 class PublishCommentByIdRequest(BaseModel):
     """通过评论 ID 发布评论到 GitLab"""
@@ -328,11 +333,22 @@ def trigger_review_structured_stream(req: UrlReviewRequest):
                 start_sha=diff_refs.get('start_sha')
             )
 
-            # 创建审查会话
+            # 准备 diff 内容
+            diff_texts = []
+            for change in mr_data.get("changes", []):
+                new_path = change.get("new_path")
+                old_path = change.get("old_path")
+                diff = change.get("diff")
+                diff_texts.append(f"旧路径: {old_path}\n新路径: {new_path}\n变更内容:\n{diff}")
+
+            full_diff_text = "\n---\n".join(diff_texts)
+
+            # 创建审查会话（保存 diff 快照）
             session = session_repo.create(
                 mr_id=mr_record['id'],
                 provider=llm_config.get('provider', 'openai'),
-                model_name=llm_config.get('model_name', 'unknown')
+                model_name=llm_config.get('model_name', 'unknown'),
+                diff_content=full_diff_text
             )
             session_uuid = session['session_uuid']
 
@@ -342,14 +358,6 @@ def trigger_review_structured_stream(req: UrlReviewRequest):
             # 更新会话状态为 streaming
             session_repo.update_status(session['id'], 'streaming')
 
-            diff_texts = []
-            for change in mr_data.get("changes", []):
-                new_path = change.get("new_path")
-                old_path = change.get("old_path")
-                diff = change.get("diff")
-                diff_texts.append(f"旧路径: {old_path}\n新路径: {new_path}\n变更内容:\n{diff}")
-
-            full_diff_text = "\n---\n".join(diff_texts)
             if not full_diff_text.strip():
                 session_repo.update_status(session['id'], 'failed', error_message='该 MR 未包含任何有效代码变更')
                 yield f"data: {json.dumps({'status': 'error', 'message': '该 MR 未包含任何有效代码变更！'})}\n\n"
@@ -376,26 +384,29 @@ def trigger_review_structured_stream(req: UrlReviewRequest):
 
 @app.post("/api/mr/publish_note")
 def publish_draft_note(req: PublishNoteRequest):
-    """创建评论草稿并立刻发布"""
+    """发布评论到 GitLab，并更新数据库中的发布状态"""
+    db = get_db()
+    comment_repo = ReviewCommentRepository(db)
+
     try:
         url = req.url.strip()
         match = re.match(r"^(https?://[^/]+)/(.+?)/-/merge_requests/(\d+)", url)
         if not match:
             raise HTTPException(status_code=400, detail="无效的 GitLab MR URL 格式。")
-            
+
         base_url_from_url = match.group(1)
         project_path = match.group(2)
         mr_iid = match.group(3)
-        
+
         config = load_config()
         gl_config = config.get("gitlab", {})
         token = gl_config.get("private_token", "")
         base_url = gl_config.get("url", base_url_from_url).rstrip("/")
-        
+
         encoded_project_id = quote(project_path, safe='')
         headers = {"PRIVATE-TOKEN": token}
-        
-        # 直接使用 discussions API 进行行内评论以避免某些 GitLab 版本对 draft_notes 的支持问题 (404)
+
+        # 直接使用 discussions API 进行行内评论
         discussion_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}/discussions"
         discussion_payload = {
             "body": req.comment,
@@ -410,14 +421,37 @@ def publish_draft_note(req: PublishNoteRequest):
                 "old_line": req.old_line
             }
         }
-        
+
         resp_discussion = httpx.post(discussion_url, headers=headers, json=discussion_payload, timeout=30.0)
         resp_discussion.raise_for_status()
-        
-        return {"message": "评论应用成功"}
+        result = resp_discussion.json()
+
+        # 获取 discussion_id 和 note_id
+        discussion_id = result.get('id')
+        note_id = result.get('notes', [{}])[0].get('id') if result.get('notes') else None
+
+        # 更新数据库中的发布状态
+        if req.comment_id:
+            comment_repo = ReviewCommentRepository(db)
+            comment_repo.mark_published(
+                req.comment_id,
+                discussion_id,
+                str(note_id) if note_id else None
+            )
+
+        return {
+            "message": "评论应用成功",
+            "discussion_id": discussion_id,
+            "note_id": note_id
+        }
     except httpx.HTTPStatusError as exc:
+        # 记录发布失败
+        if req.comment_id and comment_repo:
+            comment_repo.mark_publish_failed(req.comment_id, f"HTTP {exc.response.status_code}")
         raise HTTPException(status_code=exc.response.status_code, detail=f"GitLab API Error: {exc.response.text}")
     except Exception as e:
+        if req.comment_id and comment_repo:
+            comment_repo.mark_publish_failed(req.comment_id, str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/review")

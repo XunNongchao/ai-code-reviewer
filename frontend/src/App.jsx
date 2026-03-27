@@ -27,6 +27,7 @@ function App() {
 
   const [aiComments, setAiComments] = useState([]);
   const [statusMessage, setStatusMessage] = useState('');
+  const [currentSessionUuid, setCurrentSessionUuid] = useState(null);  // 当前审查会话 UUID
 
   // 历史记录相关状态
   const [historyList, setHistoryList] = useState([]);
@@ -134,7 +135,7 @@ function App() {
   const triggerReview = async (e) => {
     e.preventDefault();
     if (!mrUrl) return;
-    
+
     // 解析 URL
     const match = mrUrl.match(/^(https?:\/\/[^\/]+)\/(.+?)\/-\/merge_requests\/(\d+)/);
     if (match) {
@@ -147,8 +148,9 @@ function App() {
     setMessage(null);
     setAiComments([]);
     setMrData(null);
+    setCurrentSessionUuid(null);
     setStatusMessage('分析合并请求地址并请求 MR Diff 数据...');
-    
+
     try {
       // 1. 获取 diff 数据
       const diffResp = await fetch(`${API_BASE}/api/mr/diff`, {
@@ -167,21 +169,23 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: mrUrl }),
       });
-      
+
       if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      
+
       let pendingBuffer = '';
+      let sessionUuid = null;
+      let collectedComments = [];
 
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
         const text = decoder.decode(value, { stream: true });
-        
+
         const lines = text.split('\n\n');
         for (const line of lines) {
           if (line.startsWith('data: ')) {
@@ -194,21 +198,27 @@ function App() {
                  pendingBuffer += data.chunk;
                  const jsonLines = pendingBuffer.split(/\r?\n/);
                  // keep the last potentially incomplete line in buffer
-                 pendingBuffer = jsonLines.pop(); 
-                 
+                 pendingBuffer = jsonLines.pop();
+
                  for (const jLine of jsonLines) {
                      if (!jLine.trim()) continue;
                      try {
                         const parsedObj = JSON.parse(jLine);
                         if (parsedObj.new_path && (parsedObj.line || parsedObj.new_line)) {
                            // add valid comment to state
-                           setAiComments(prev => [...prev, parsedObj]);
+                           collectedComments.push(parsedObj);
+                           setAiComments(prev => [...prev, { ...parsedObj, gitlab_published: false }]);
                         }
                      } catch(e) { } // ignore incomplete json line parser errors
                  }
                  setStatusMessage('大语言模型正在深度分析代码中...');
               } else if (data.status === 'info') {
                 setStatusMessage(data.message);
+                // 获取 session_uuid
+                if (data.session_uuid) {
+                  sessionUuid = data.session_uuid;
+                  setCurrentSessionUuid(sessionUuid);
+                }
               } else if (data.status === 'error') {
                 setMessage({ type: 'error', text: data.message });
                 setIsSubmitting(false);
@@ -217,6 +227,23 @@ function App() {
               } else if (data.status === 'done') {
                 setMessage({ type: 'success', text: data.message });
                 setStatusMessage('');
+                // 保存评论到数据库
+                if (sessionUuid && collectedComments.length > 0) {
+                  try {
+                    await api.post('/session/comments', {
+                      session_uuid: sessionUuid,
+                      comments: collectedComments.map(c => ({
+                        new_path: c.new_path,
+                        old_path: c.old_path,
+                        new_line: c.new_line || c.line,
+                        old_line: c.old_line,
+                        comment: c.comment
+                      }))
+                    });
+                  } catch (err) {
+                    console.error('保存评论失败:', err);
+                  }
+                }
               }
             } catch (err) {
                console.error("解析SSE出错", err);
@@ -224,13 +251,34 @@ function App() {
           }
         }
       }
-      
+
       // flush remaining buffer
       if (pendingBuffer.trim()) {
          try {
             const parsedObj = JSON.parse(pendingBuffer);
-            if (parsedObj.new_path) setAiComments(prev => [...prev, parsedObj]);
+            if (parsedObj.new_path) {
+              collectedComments.push(parsedObj);
+              setAiComments(prev => [...prev, { ...parsedObj, gitlab_published: false }]);
+            }
          } catch(e) {}
+      }
+
+      // 最终保存评论
+      if (sessionUuid && collectedComments.length > 0) {
+        try {
+          await api.post('/session/comments', {
+            session_uuid: sessionUuid,
+            comments: collectedComments.map(c => ({
+              new_path: c.new_path,
+              old_path: c.old_path,
+              new_line: c.new_line || c.line,
+              old_line: c.old_line,
+              comment: c.comment
+            }))
+          });
+        } catch (err) {
+          console.error('保存评论失败:', err);
+        }
       }
     } catch (error) {
       setMessage({ type: 'error', text: '网络请求失败，请确保后端服务 (8000) 正在运行。' });
