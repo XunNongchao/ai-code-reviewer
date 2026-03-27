@@ -1,4 +1,4 @@
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -7,8 +7,20 @@ import time
 import json
 import httpx
 import re
+import uuid
 from urllib.parse import quote
 from reviewer import load_config, save_config, review_code_diff, review_code_diff_stream, review_code_diff_structured
+
+# 导入数据库层
+from database import (
+    get_db, init_db,
+    ProjectRepository, MergeRequestRepository,
+    ReviewSessionRepository, ReviewCommentRepository
+)
+from models import ReviewStatus
+
+# 初始化数据库
+init_db()
 
 app = FastAPI(title="LLM Code Review Agent", version="1.0.0")
 
@@ -41,6 +53,15 @@ class PublishNoteRequest(BaseModel):
     base_sha: str
     head_sha: str
     start_sha: str
+
+class PublishCommentByIdRequest(BaseModel):
+    """通过评论 ID 发布评论到 GitLab"""
+    comment_id: int
+
+class SessionCommentsRequest(BaseModel):
+    """保存会话评论的请求"""
+    session_uuid: str
+    comments: list  # List of {new_path, old_path, new_line, old_line, comment}
 
 
 def execute_review_task(project_id: str | int, mr_iid: int):
@@ -254,57 +275,101 @@ def get_mr_diff(req: UrlReviewRequest):
 
 @app.post("/api/review/structured_stream")
 def trigger_review_structured_stream(req: UrlReviewRequest):
-    """流式返回代码审查结果，输出为 JSON Lines，基于前端拉取的同一 MR URL"""
+    """流式返回代码审查结果，输出为 JSON Lines，基于前端拉取的同一 MR URL。同时创建审查会话记录。"""
+    db = get_db()
+    project_repo = ProjectRepository(db)
+    mr_repo = MergeRequestRepository(db)
+    session_repo = ReviewSessionRepository(db)
+
     def generate_response():
+        session = None
         try:
             url = req.url.strip()
             match = re.match(r"^(https?://[^/]+)/(.+?)/-/merge_requests/(\d+)", url)
             if not match:
                 yield f"data: {json.dumps({'status': 'error', 'message': '无效的 GitLab MR URL 格式。'})}\n\n"
                 return
-                
+
             base_url_from_url = match.group(1)
             project_path = match.group(2)
-            mr_iid = match.group(3)
-            
+            mr_iid = int(match.group(3))
+
             config = load_config()
             gl_config = config.get("gitlab", {})
             token = gl_config.get("private_token", "")
             base_url = gl_config.get("url", base_url_from_url).rstrip("/")
-            
+            llm_config = config.get("llm_config", {})
+
             if not token or token == "CHANGEME":
                 yield f"data: {json.dumps({'status': 'error', 'message': '未配置正确的 GitLab Private Token'})}\n\n"
                 return
-                
+
             encoded_project_id = quote(project_path, safe='')
             api_url = f"{base_url}/api/v4/projects/{encoded_project_id}/merge_requests/{mr_iid}/changes"
             headers = {"PRIVATE-TOKEN": token}
-            
+
             resp = httpx.get(api_url, headers=headers, timeout=30.0)
             resp.raise_for_status()
             mr_data = resp.json()
-            
+
+            # 创建或获取 Project 和 MR 记录
+            project = project_repo.get_or_create(project_path)
+            diff_refs = mr_data.get("diff_refs", {})
+            mr_record = mr_repo.get_or_create(
+                project_id=project['id'],
+                mr_iid=mr_iid,
+                title=mr_data.get('title'),
+                source_branch=mr_data.get('source_branch'),
+                target_branch=mr_data.get('target_branch'),
+                author=mr_data.get('author', {}).get('username'),
+                web_url=mr_data.get('web_url'),
+                base_sha=diff_refs.get('base_sha'),
+                head_sha=diff_refs.get('head_sha'),
+                start_sha=diff_refs.get('start_sha')
+            )
+
+            # 创建审查会话
+            session = session_repo.create(
+                mr_id=mr_record['id'],
+                provider=llm_config.get('provider', 'openai'),
+                model_name=llm_config.get('model_name', 'unknown')
+            )
+            session_uuid = session['session_uuid']
+
+            # 返回 session_uuid 给前端
+            yield f"data: {json.dumps({'status': 'info', 'session_uuid': session_uuid, 'message': '审查会话已创建'})}\n\n"
+
+            # 更新会话状态为 streaming
+            session_repo.update_status(session['id'], 'streaming')
+
             diff_texts = []
             for change in mr_data.get("changes", []):
                 new_path = change.get("new_path")
                 old_path = change.get("old_path")
                 diff = change.get("diff")
                 diff_texts.append(f"旧路径: {old_path}\n新路径: {new_path}\n变更内容:\n{diff}")
-                
+
             full_diff_text = "\n---\n".join(diff_texts)
             if not full_diff_text.strip():
+                session_repo.update_status(session['id'], 'failed', error_message='该 MR 未包含任何有效代码变更')
                 yield f"data: {json.dumps({'status': 'error', 'message': '该 MR 未包含任何有效代码变更！'})}\n\n"
                 return
-            
+
             # 流式审查，直接回传原始 chunk
             for chunk in review_code_diff_structured(full_diff_text):
                 yield f"data: {json.dumps({'status': 'streaming', 'chunk': chunk})}\n\n"
-                
-            yield f"data: {json.dumps({'status': 'done', 'message': '审查完成'})}\n\n"
-            
+
+            # 更新会话状态为 completed
+            session_repo.update_status(session['id'], 'completed')
+            yield f"data: {json.dumps({'status': 'done', 'session_uuid': session_uuid, 'message': '审查完成'})}\n\n"
+
         except httpx.HTTPStatusError as exc:
+            if session:
+                session_repo.update_status(session['id'], 'failed', error_message=f'GitLab API 错误: {exc.response.status_code}')
             yield f"data: {json.dumps({'status': 'error', 'message': f'GitLab API 请求失败: HTTP {exc.response.status_code}'})}\n\n"
         except Exception as e:
+            if session:
+                session_repo.update_status(session['id'], 'failed', error_message=str(e))
             yield f"data: {json.dumps({'status': 'error', 'message': f'执行异常: {str(e)}'})}\n\n"
 
     return StreamingResponse(generate_response(), media_type="text/event-stream")
@@ -362,5 +427,200 @@ def trigger_review(req: ReviewRequest, background_tasks: BackgroundTasks):
         # 直接交给 FastAPI 自持的后台任务（实现同步响应，异步执行的效果）
         background_tasks.add_task(execute_review_task, req.project_id, req.mr_iid)
         return {"message": "审查任务已加入队列正在后台执行", "project_id": req.project_id, "mr_iid": req.mr_iid}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# 审查记录持久化 API
+# ============================================================================
+
+@app.post("/api/session/comments")
+def save_session_comments(req: SessionCommentsRequest):
+    """保存审查会话的评论到数据库"""
+    try:
+        db = get_db()
+        session_repo = ReviewSessionRepository(db)
+        comment_repo = ReviewCommentRepository(db)
+
+        # 查找会话
+        session = session_repo.find_by_uuid(req.session_uuid)
+        if not session:
+            raise HTTPException(status_code=404, detail="审查会话不存在")
+
+        # 批量保存评论
+        saved_comments = comment_repo.batch_create(session['id'], req.comments)
+
+        return {
+            "message": "评论保存成功",
+            "session_id": session['id'],
+            "count": len(saved_comments)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/comments/{comment_id}/publish")
+def publish_comment_by_id(comment_id: int, req: PublishCommentByIdRequest = None):
+    """发布指定评论到 GitLab，并更新数据库中的发布状态"""
+    try:
+        db = get_db()
+        comment_repo = ReviewCommentRepository(db)
+        session_repo = ReviewSessionRepository(db)
+        mr_repo = MergeRequestRepository(db)
+
+        # 获取评论及其关联信息
+        comment_with_session = comment_repo.find_by_id_with_session(comment_id)
+        if not comment_with_session:
+            raise HTTPException(status_code=404, detail="评论不存在")
+
+        if comment_with_session.get('gitlab_published'):
+            raise HTTPException(status_code=400, detail="该评论已发布")
+
+        # 获取 MR 信息
+        session = session_repo.find_by_id(comment_with_session['session_id'])
+        mr = mr_repo.find_by_id(session['mr_id'])
+
+        config = load_config()
+        gl_config = config.get("gitlab", {})
+        token = gl_config.get("private_token", "")
+        base_url = gl_config.get("url", "").rstrip("/")
+
+        if not token or token == "CHANGEME":
+            raise HTTPException(status_code=400, detail="未配置 GitLab Token")
+
+        # 构建发布请求
+        encoded_project_id = quote(mr['project_path'], safe='')
+        # 需要从 projects 表获取 project_path
+        from database import ProjectRepository
+        project_repo = ProjectRepository(db)
+        project = project_repo.find_by_id(mr['project_id'])
+
+        discussion_url = f"{base_url}/api/v4/projects/{quote(project['project_path'], safe='')}/merge_requests/{mr['mr_iid']}/discussions"
+        headers = {"PRIVATE-TOKEN": token}
+
+        discussion_payload = {
+            "body": comment_with_session['comment_text'],
+            "position": {
+                "position_type": "text",
+                "base_sha": mr['base_sha'],
+                "head_sha": mr['head_sha'],
+                "start_sha": mr['start_sha'],
+                "new_path": comment_with_session['new_path'],
+                "old_path": comment_with_session.get('old_path') or comment_with_session['new_path'],
+                "new_line": comment_with_session.get('new_line'),
+                "old_line": comment_with_session.get('old_line')
+            }
+        }
+
+        resp = httpx.post(discussion_url, headers=headers, json=discussion_payload, timeout=30.0)
+        resp.raise_for_status()
+        result = resp.json()
+
+        # 更新评论的发布状态
+        discussion_id = result.get('id')
+        note_id = result.get('notes', [{}])[0].get('id') if result.get('notes') else None
+
+        comment_repo.mark_published(comment_id, discussion_id, str(note_id) if note_id else None)
+
+        return {
+            "success": True,
+            "comment_id": comment_id,
+            "gitlab_discussion_id": discussion_id,
+            "gitlab_note_id": note_id
+        }
+    except httpx.HTTPStatusError as exc:
+        comment_repo.mark_publish_failed(comment_id, f"HTTP {exc.response.status_code}: {exc.response.text}")
+        raise HTTPException(status_code=exc.response.status_code, detail=f"GitLab API 错误: {exc.response.text}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# 历史记录 API
+# ============================================================================
+
+@app.get("/api/history")
+def get_review_history(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)):
+    """获取审查历史记录列表"""
+    try:
+        db = get_db()
+        session_repo = ReviewSessionRepository(db)
+
+        sessions = session_repo.find_recent(limit=limit, offset=offset)
+
+        return {
+            "items": sessions,
+            "limit": limit,
+            "offset": offset,
+            "total": len(sessions)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/history/{session_uuid}")
+def get_review_history_detail(session_uuid: str):
+    """获取指定审查会话的详细信息"""
+    try:
+        db = get_db()
+        session_repo = ReviewSessionRepository(db)
+        comment_repo = ReviewCommentRepository(db)
+        mr_repo = MergeRequestRepository(db)
+        project_repo = ProjectRepository(db)
+
+        session = session_repo.find_by_uuid(session_uuid)
+        if not session:
+            raise HTTPException(status_code=404, detail="审查会话不存在")
+
+        # 获取关联的 MR 和 Project
+        mr = mr_repo.find_by_id(session['mr_id'])
+        project = project_repo.find_by_id(mr['project_id']) if mr else None
+
+        # 获取评论列表
+        comments = comment_repo.find_by_session(session['id'])
+
+        # 获取发布统计
+        publish_stats = comment_repo.get_publish_stats(session['id'])
+
+        return {
+            "session": session,
+            "project": project,
+            "merge_request": mr,
+            "comments": comments,
+            "publish_stats": publish_stats
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sessions/{session_uuid}/comments")
+def get_session_comments(session_uuid: str):
+    """获取指定会话的所有评论"""
+    try:
+        db = get_db()
+        session_repo = ReviewSessionRepository(db)
+        comment_repo = ReviewCommentRepository(db)
+
+        session = session_repo.find_by_uuid(session_uuid)
+        if not session:
+            raise HTTPException(status_code=404, detail="审查会话不存在")
+
+        comments = comment_repo.find_by_session(session['id'])
+        publish_stats = comment_repo.get_publish_stats(session['id'])
+
+        return {
+            "session_uuid": session_uuid,
+            "comments": comments,
+            "publish_stats": publish_stats
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

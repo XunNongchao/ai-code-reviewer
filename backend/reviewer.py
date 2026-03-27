@@ -1,5 +1,4 @@
 import os
-import toml
 import logging
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
@@ -7,22 +6,85 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import SystemMessage, HumanMessage
 
+# 导入数据库层
+from database import get_db, init_db, ConfigRepository, LLMProviderRepository
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("CodeReviewer")
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.toml")
+# 初始化数据库（首次导入时执行）
+init_db()
 
 def load_config() -> dict:
-    """载入 TOML 配置"""
-    if not os.path.exists(CONFIG_PATH):
-        raise FileNotFoundError(f"配置文件缺失: {CONFIG_PATH}")
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return toml.load(f)
+    """从 SQLite 数据库加载配置（保持与原 TOML 格式兼容）"""
+    db = get_db()
+    config_repo = ConfigRepository(db)
+    provider_repo = LLMProviderRepository(db)
+
+    settings = config_repo.get_settings()
+    if not settings:
+        raise RuntimeError("数据库配置未初始化")
+
+    # 获取当前活跃的 provider 信息
+    active_provider_name = settings.get('active_provider', 'openai')
+    provider = provider_repo.find_by_name(active_provider_name)
+
+    # 构建与原 TOML 格式兼容的配置结构
+    config = {
+        "llm_config": {
+            "provider": active_provider_name,
+            "model_name": settings.get('active_model', 'gpt-4o-mini'),
+            "base_url": provider.get('base_url') if provider else None,
+            "api_key": provider.get('api_key') if provider else None,
+        },
+        "gitlab": {
+            "url": settings.get('gitlab_url', 'https://gitlab.example.com'),
+            "private_token": settings.get('gitlab_token'),
+        },
+        "rules": {
+            "default_prompt": settings.get('default_prompt', '你是一个代码审查专家。'),
+        }
+    }
+
+    return config
 
 def save_config(config_data: dict):
-    """保存配置到 TOML"""
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        toml.dump(config_data, f)
+    """保存配置到 SQLite 数据库"""
+    db = get_db()
+    config_repo = ConfigRepository(db)
+    provider_repo = LLMProviderRepository(db)
+
+    # 更新 llm_config 相关配置
+    llm_config = config_data.get('llm_config', {})
+    if llm_config:
+        provider_name = llm_config.get('provider')
+        if provider_name:
+            # 更新或创建 provider
+            provider_repo.upsert(
+                name=provider_name,
+                base_url=llm_config.get('base_url'),
+                api_key=llm_config.get('api_key')
+            )
+            # 更新活跃配置
+            config_repo.update_settings(
+                active_provider=provider_name,
+                active_model=llm_config.get('model_name')
+            )
+
+    # 更新 gitlab 配置
+    gitlab_config = config_data.get('gitlab', {})
+    if gitlab_config:
+        config_repo.update_settings(
+            gitlab_url=gitlab_config.get('url'),
+            gitlab_token=gitlab_config.get('private_token')
+        )
+
+    # 更新 rules 配置
+    rules_config = config_data.get('rules', {})
+    if rules_config:
+        config_repo.update_settings(
+            default_prompt=rules_config.get('default_prompt')
+        )
 
 def get_llm():
     """采用类 Inkos 的单一全局配置方案，彻底脱离多厂商多 Key 的结构包袱。
