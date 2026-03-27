@@ -43,13 +43,7 @@ function App() {
     }
   }, [activeTab]);
 
-  // 当 AI 开始输出审查评论时，自动进入全屏聚焦模式（只触发一次）
-  useEffect(() => {
-    if (aiComments.length > 0 && !hasAutoFullscreenRef.current) {
-      setIsFullscreenMode(true);
-      hasAutoFullscreenRef.current = true; // 标记已触发，避免重复
-    }
-  }, [aiComments]);
+  // 全屏模式由 triggerReview 手动控制，移除自动触发逻辑
 
   // ESC 键退出全屏
   useEffect(() => {
@@ -117,6 +111,9 @@ function App() {
     setMrData(null);
     setStatusMessage('分析合并请求地址并请求 MR Diff 数据...');
     hasAutoFullscreenRef.current = false; // 重置全屏标记
+
+    // 立即弹出全屏聚焦模式
+    setIsFullscreenMode(true);
 
     try {
       // 1. 获取 diff 数据
