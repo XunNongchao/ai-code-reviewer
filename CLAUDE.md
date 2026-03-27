@@ -18,14 +18,14 @@ cd backend
 python -m venv venv
 .\venv\Scripts\activate  # Windows
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8000  # --host 0.0.0.0 允许局域网访问
 ```
 
 ### 前端
 ```bash
 cd frontend
 npm install
-npm run dev      # http://localhost:5173
+npm run dev      # http://localhost:5173 (vite.config.js 已配置 host: '0.0.0.0')
 npm run build    # 生产构建
 npm run lint     # ESLint 检查
 ```

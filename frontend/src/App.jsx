@@ -10,9 +10,10 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import DiffViewer from './DiffViewer';
 
-// API 配置 (前端端口是5173，后端如果是8000，则设置baseURL)
+// API 配置 - 动态获取后端地址，支持局域网访问
+const API_BASE = `http://${window.location.hostname}:8000`;
 const api = axios.create({
-  baseURL: 'http://localhost:8000/api',
+  baseURL: `${API_BASE}/api`,
 });
 
 function App() {
@@ -87,7 +88,7 @@ function App() {
     
     try {
       // 1. 获取 diff 数据
-      const diffResp = await fetch('http://localhost:8000/api/mr/diff', {
+      const diffResp = await fetch(`${API_BASE}/api/mr/diff`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: mrUrl }),
@@ -98,7 +99,7 @@ function App() {
 
       // 2. 触发流式审查
       setStatusMessage('正在由大语言模型逐行扫描代码...');
-      const response = await fetch('http://localhost:8000/api/review/structured_stream', {
+      const response = await fetch(`${API_BASE}/api/review/structured_stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: mrUrl }),

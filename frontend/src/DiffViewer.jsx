@@ -4,6 +4,9 @@ import { Play, CheckCircle2, FileCode2, MessagesSquare } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+// API 基础地址 - 动态获取，支持局域网访问
+const API_BASE = `http://${window.location.hostname}:8000`;
+
 function CommentBox({ commentData, fileInfo, diffRefs, mrData, row, onApply, onDelete }) {
   const [text, setText] = useState(commentData.comment);
   const [status, setStatus] = useState('idle'); // idle, loading, success, error
@@ -11,7 +14,7 @@ function CommentBox({ commentData, fileInfo, diffRefs, mrData, row, onApply, onD
   const handleApply = async () => {
     setStatus('loading');
     try {
-      const resp = await fetch('http://localhost:8000/api/mr/publish_note', {
+      const resp = await fetch(`${API_BASE}/api/mr/publish_note`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
