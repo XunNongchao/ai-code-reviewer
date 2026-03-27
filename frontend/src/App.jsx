@@ -26,11 +26,9 @@ function App() {
   const [aiComments, setAiComments] = useState([]);
   const [statusMessage, setStatusMessage] = useState('');
 
-  // 全屏报告相关状态
-  const [reviewReport, setReviewReport] = useState(null);
+  // 全屏聚焦模式状态
   const [isFullscreenMode, setIsFullscreenMode] = useState(false);
   const hasAutoFullscreenRef = useRef(false);
-  const reportContainerRef = useRef(null);
 
   const [config, setConfig] = useState({
     llm_config: { provider: 'openai', model_name: '', base_url: '', api_key: '' },
@@ -45,12 +43,13 @@ function App() {
     }
   }, [activeTab]);
 
-  // 当 reviewReport 更新时自动滚动到底部
+  // 当 AI 开始输出审查评论时，自动进入全屏聚焦模式（只触发一次）
   useEffect(() => {
-    if (reportContainerRef.current && reviewReport) {
-      reportContainerRef.current.scrollTop = reportContainerRef.current.scrollHeight;
+    if (aiComments.length > 0 && !hasAutoFullscreenRef.current) {
+      setIsFullscreenMode(true);
+      hasAutoFullscreenRef.current = true; // 标记已触发，避免重复
     }
-  }, [reviewReport]);
+  }, [aiComments]);
 
   // ESC 键退出全屏
   useEffect(() => {
@@ -64,19 +63,11 @@ function App() {
     return () => window.removeEventListener('keydown', onKeydown);
   }, [isFullscreenMode]);
 
-  // 当 AI 开始输出时，立即进入全屏聚焦模式（只触发一次）
-  useEffect(() => {
-    if (reviewReport && reviewReport.length > 0 && !hasAutoFullscreenRef.current) {
-      setIsFullscreenMode(true);
-      hasAutoFullscreenRef.current = true; // 标记已触发，避免重复
-    }
-  }, [reviewReport]);
-
-  const enterBrowserFullscreen = () => {
+  const enterFullscreenMode = () => {
     setIsFullscreenMode(true);
   };
 
-  const exitBrowserFullscreen = () => {
+  const exitFullscreenMode = () => {
     setIsFullscreenMode(false);
   };
 
@@ -125,7 +116,6 @@ function App() {
     setAiComments([]);
     setMrData(null);
     setStatusMessage('分析合并请求地址并请求 MR Diff 数据...');
-    setReviewReport('');
     hasAutoFullscreenRef.current = false; // 重置全屏标记
 
     try {
@@ -139,113 +129,78 @@ function App() {
       const diffInfo = await diffResp.json();
       setMrData({ ...diffInfo, url: mrUrl });
 
-      // 2. 同时触发两个流式审查
+      // 2. 触发流式审查
       setStatusMessage('正在由大语言模型逐行扫描代码...');
-
-      // 启动结构化审查（用于 DiffViewer）
-      const structuredResponsePromise = fetch('http://localhost:8000/api/review/structured_stream', {
+      const response = await fetch('http://localhost:8000/api/review/structured_stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: mrUrl }),
       });
 
-      // 启动文本报告审查（用于全屏显示）
-      const streamResponsePromise = fetch('http://localhost:8000/api/review/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: mrUrl }),
-      });
-
-      // 处理结构化流
-      const structuredResponse = await structuredResponsePromise;
-      if (structuredResponse.ok) {
-        const reader = structuredResponse.body.getReader();
-        const decoder = new TextDecoder();
-        let pendingBuffer = '';
-
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const text = decoder.decode(value, { stream: true });
-
-          const lines = text.split('\n\n');
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const dataStr = line.replace('data: ', '');
-              if (!dataStr.trim()) continue;
-              try {
-                const data = JSON.parse(dataStr);
-                if (data.status === 'streaming') {
-                   pendingBuffer += data.chunk;
-                   const jsonLines = pendingBuffer.split(/\r?\n/);
-                   pendingBuffer = jsonLines.pop();
-
-                   for (const jLine of jsonLines) {
-                       if (!jLine.trim()) continue;
-                       try {
-                          const parsedObj = JSON.parse(jLine);
-                          if (parsedObj.new_path && (parsedObj.line || parsedObj.new_line)) {
-                             setAiComments(prev => [...prev, parsedObj]);
-                          }
-                       } catch(e) { }
-                   }
-                   setStatusMessage('大语言模型正在深度分析代码中...');
-                } else if (data.status === 'info') {
-                  setStatusMessage(data.message);
-                } else if (data.status === 'error') {
-                  setMessage({ type: 'error', text: data.message });
-                } else if (data.status === 'done') {
-                  setMessage({ type: 'success', text: data.message });
-                  setStatusMessage('');
-                }
-              } catch (err) {
-                 console.error("解析SSE出错", err);
-              }
-            }
-          }
-        }
-
-        if (pendingBuffer.trim()) {
-           try {
-              const parsedObj = JSON.parse(pendingBuffer);
-              if (parsedObj.new_path) setAiComments(prev => [...prev, parsedObj]);
-           } catch(e) {}
-        }
+      if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      // 处理文本流
-      const streamResponse = await streamResponsePromise;
-      if (streamResponse.ok) {
-        const reader = streamResponse.body.getReader();
-        const decoder = new TextDecoder();
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
 
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const text = decoder.decode(value, { stream: true });
+      let pendingBuffer = '';
 
-          const lines = text.split('\n\n');
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const dataStr = line.replace('data: ', '');
-              if (!dataStr.trim()) continue;
-              try {
-                const data = JSON.parse(dataStr);
-                if (data.status === 'streaming') {
-                  setReviewReport(prev => (prev || '') + data.chunk);
-                } else if (data.status === 'info') {
-                  if (data.message.includes('✅')) {
-                     setReviewReport(prev => (prev || '') + data.message);
-                  }
-                }
-              } catch (err) {
-                 console.error("解析SSE出错", err);
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+
+        const lines = text.split('\n\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const dataStr = line.replace('data: ', '');
+            if (!dataStr.trim()) continue;
+            try {
+              const data = JSON.parse(dataStr);
+              if (data.status === 'streaming') {
+                 // accumulated buffer for json lines
+                 pendingBuffer += data.chunk;
+                 const jsonLines = pendingBuffer.split(/\r?\n/);
+                 // keep the last potentially incomplete line in buffer
+                 pendingBuffer = jsonLines.pop();
+
+                 for (const jLine of jsonLines) {
+                     if (!jLine.trim()) continue;
+                     try {
+                        const parsedObj = JSON.parse(jLine);
+                        if (parsedObj.new_path && (parsedObj.line || parsedObj.new_line)) {
+                           // add valid comment to state
+                           setAiComments(prev => [...prev, parsedObj]);
+                        }
+                     } catch(e) { } // ignore incomplete json line parser errors
+                 }
+                 setStatusMessage('大语言模型正在深度分析代码中...');
+              } else if (data.status === 'info') {
+                setStatusMessage(data.message);
+              } else if (data.status === 'error') {
+                setMessage({ type: 'error', text: data.message });
+                setIsSubmitting(false);
+                setStatusMessage('');
+                return;
+              } else if (data.status === 'done') {
+                setMessage({ type: 'success', text: data.message });
+                setStatusMessage('');
               }
+            } catch (err) {
+               console.error("解析SSE出错", err);
             }
           }
         }
       }
 
+      // flush remaining buffer
+      if (pendingBuffer.trim()) {
+         try {
+            const parsedObj = JSON.parse(pendingBuffer);
+            if (parsedObj.new_path) setAiComments(prev => [...prev, parsedObj]);
+         } catch(e) {}
+      }
     } catch (error) {
       setMessage({ type: 'error', text: '网络请求失败，请确保后端服务 (8000) 正在运行。' });
       setStatusMessage('');
@@ -264,24 +219,34 @@ function App() {
     setIsSubmitting(false);
   };
 
-  const showReportPanel = Boolean(statusMessage || reviewReport || isSubmitting);
-
-  const renderFullscreenReport = () => (
+  const renderFullscreenDiffViewer = () => (
     <div className="fixed inset-0 z-[100] bg-white flex flex-col animate-fade-in-scale">
+      {/* Header */}
       <div className="flex items-center justify-between gap-6 px-6 md:px-10 py-5 bg-white border-b border-gray-200 shadow-sm">
-        <h3 className="text-2xl md:text-3xl font-semibold flex items-center gap-3 text-appleGray-800">
-          <span className="text-3xl">🤖</span> AI 实时审查报告
-        </h3>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-3xl">🔍</span>
+            <h3 className="text-2xl md:text-3xl font-semibold text-appleGray-800">AI 审查聚焦模式</h3>
+          </div>
           {statusMessage && (
             <div className="hidden md:flex items-center gap-2 text-base text-appleBlue font-medium bg-blue-50 px-5 py-2.5 rounded-full animate-pulse">
               <div className="w-2.5 h-2.5 rounded-full bg-appleBlue"></div>
               {statusMessage}
             </div>
           )}
+        </div>
+        <div className="flex items-center gap-3">
+          {parsedMR && (
+            <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-4 py-2 rounded-full border border-gray-200">
+              <GitMerge size={16} />
+              <span className="font-medium">{parsedMR.projectId}</span>
+              <span className="text-gray-300">/</span>
+              <span className="text-appleBlue font-medium">!{parsedMR.mrIid}</span>
+            </div>
+          )}
           <button
-            onClick={exitBrowserFullscreen}
-            className="flex items-center gap-2 text-base font-medium text-gray-600 hover:text-appleBlue bg-white px-5 py-2.5 rounded-full transition-all shadow-sm hover:shadow-md border border-gray-200"
+            onClick={exitFullscreenMode}
+            className="flex items-center gap-2 text-base font-medium text-gray-600 hover:text-red-500 bg-white px-5 py-2.5 rounded-full transition-all shadow-sm hover:shadow-md border border-gray-200 hover:border-red-200"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -291,6 +256,7 @@ function App() {
         </div>
       </div>
 
+      {/* Mobile status */}
       {statusMessage && (
         <div className="md:hidden px-4 pt-4 bg-white">
           <div className="flex items-center gap-2 text-sm text-appleBlue font-medium bg-blue-50 px-4 py-2 rounded-2xl animate-pulse">
@@ -300,6 +266,7 @@ function App() {
         </div>
       )}
 
+      {/* Error message */}
       {message?.type === 'error' && (
         <div className="px-4 md:px-10 pt-4 bg-white">
           <div className="w-full p-4 rounded-2xl flex items-center gap-3 bg-red-50 text-red-800 border border-red-100">
@@ -309,35 +276,51 @@ function App() {
         </div>
       )}
 
-      <div
-        ref={reportContainerRef}
-        className="flex-1 overflow-y-auto scroll-smooth bg-white px-6 py-8 md:px-16 md:py-12"
-      >
-        {reviewReport ? (
-          <div className="prose prose-lg md:prose-xl max-w-none prose-blue text-gray-700">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {reviewReport}
-            </ReactMarkdown>
-          </div>
-        ) : (
-          <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-4">
-            {isSubmitting ? (
-              <>
-                <div className="w-10 h-10 relative">
-                  <div className="absolute inset-0 rounded-full border-2 border-gray-200"></div>
-                  <div className="absolute inset-0 rounded-full border-2 border-appleBlue border-t-transparent animate-spin"></div>
-                </div>
-                <span className="text-lg">正在准备输出内容...</span>
-              </>
-            ) : (
-              <span className="text-lg">暂无审查内容</span>
-            )}
-          </div>
-        )}
-        {isSubmitting && reviewReport && (
-          <span className="inline-block ml-1 w-1.5 h-[1.1em] align-middle bg-appleBlue animate-pulse"></span>
-        )}
+      {/* Diff Viewer Content */}
+      <div className="flex-1 overflow-y-auto bg-gray-50 px-4 md:px-8 py-6">
+        <div className="max-w-full mx-auto">
+          {mrData ? (
+            <DiffViewer
+              mrData={mrData}
+              aiComments={aiComments}
+              onDeleteComment={(comment) => setAiComments(prev => prev.filter(c => c !== comment))}
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-4 py-20">
+              <div className="w-16 h-16 relative">
+                <div className="absolute inset-0 rounded-full border-4 border-gray-200"></div>
+                <div className="absolute inset-0 rounded-full border-4 border-appleBlue border-t-transparent animate-spin"></div>
+              </div>
+              <div className="text-center">
+                <p className="text-lg font-medium text-gray-600">正在加载代码差异...</p>
+                <p className="text-sm mt-2">请稍候片刻</p>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Floating navigation for fullscreen mode */}
+      {aiComments.length > 0 && (
+        <div className="fixed bottom-8 right-8 flex flex-col gap-3 z-50">
+          <button onClick={scrollToPrevSuggestion} className="w-14 h-14 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center animate-in fade-in slide-in-from-bottom-4 transition-all hover:scale-105" title="上一个审查点">
+             <ChevronUp size={28} />
+          </button>
+          <button onClick={scrollToNextSuggestion} className="w-14 h-14 bg-appleBlue text-white rounded-full shadow-lg shadow-appleBlue/30 flex items-center justify-center animate-in fade-in slide-in-from-bottom-4 transition-all hover:scale-105" title="下一个审查点">
+             <ChevronDown size={28} />
+          </button>
+        </div>
+      )}
+
+      {/* Stats bar */}
+      {aiComments.length > 0 && (
+        <div className="fixed bottom-8 left-8 bg-white rounded-full shadow-lg border border-gray-200 px-6 py-3 flex items-center gap-3 z-50">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">💡</span>
+            <span className="text-sm font-medium text-gray-700">已生成 <span className="text-appleBlue font-bold text-lg">{aiComments.length}</span> 条审查建议</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -405,17 +388,17 @@ function App() {
                             <span className="text-appleBlue flex-shrink-0">!{parsedMR?.mrIid}</span>
                          </div>
                       </div>
-                      {/* 添加聚焦模式按钮 */}
-                      {(reviewReport || isSubmitting) && (
+                      {/* 进入聚焦模式按钮 */}
+                      {(mrData || aiComments.length > 0) && (
                         <button
-                          onClick={enterBrowserFullscreen}
-                          className="flex items-center gap-2 text-sm font-medium text-appleBlue bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-full transition-all"
-                          title="查看完整报告"
+                          onClick={enterFullscreenMode}
+                          className="flex items-center gap-2 text-sm font-medium text-appleBlue bg-blue-50 hover:bg-blue-100 px-4 py-2 rounded-full transition-all hover:scale-105"
+                          title="进入聚焦模式查看详细审查"
                         >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
                           </svg>
-                          聚焦报告
+                          聚焦模式
                         </button>
                       )}
                    </div>
@@ -653,8 +636,8 @@ function App() {
         </>
       )}
 
-      {/* 全屏报告模式 */}
-      {isFullscreenMode && renderFullscreenReport()}
+      {/* 全屏聚焦模式 - 使用 DiffViewer 展示 */}
+      {isFullscreenMode && renderFullscreenDiffViewer()}
 
     </div>
   );
