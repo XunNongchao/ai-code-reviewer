@@ -465,9 +465,9 @@ function App() {
                         <List size={20} className="text-appleBlue" />
                         识别到 {parsedMRs.length} 个 Merge Request
                       </h3>
-                      {reviewProgress.total > 0 && (
-                        <div className="text-sm text-gray-500">
-                          进度: {reviewProgress.current}/{reviewProgress.total}
+                      {isSubmitting && (
+                        <div className="text-sm text-appleBlue font-medium">
+                          审查中... {parsedMRs.filter(mr => mr.status === 'completed').length}/{parsedMRs.length}
                         </div>
                       )}
                     </div>
