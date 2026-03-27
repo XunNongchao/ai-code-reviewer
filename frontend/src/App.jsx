@@ -4,7 +4,8 @@ import {
   Settings, FileCode2, Play, GitMerge,
   CheckCircle2, ShieldAlert, Key, Link,
   ArrowUp, ChevronDown, ChevronUp, History,
-  Clock, MessageSquare, CheckCircle, XCircle
+  Clock, MessageSquare, CheckCircle, XCircle,
+  List, ChevronRight, Loader2
 } from 'lucide-react';
 
 import ReactMarkdown from 'react-markdown';
@@ -19,15 +20,19 @@ const api = axios.create({
 
 function App() {
   const [activeTab, setActiveTab] = useState('review');
-  const [mrUrl, setMrUrl] = useState('');
-  const [parsedMR, setParsedMR] = useState(null);
+  const [mrUrlsText, setMrUrlsText] = useState('');  // textarea 内容
+  const [parsedMRs, setParsedMRs] = useState([]);     // 解析后的 MR 列表
   const [mrData, setMrData] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [message, setMessage] = useState(null);
 
   const [aiComments, setAiComments] = useState([]);
   const [statusMessage, setStatusMessage] = useState('');
-  const [currentSessionUuid, setCurrentSessionUuid] = useState(null);  // 当前审查会话 UUID
+  const [currentSessionUuid, setCurrentSessionUuid] = useState(null);
+
+  // 批量审查相关状态
+  const [batchMode, setBatchMode] = useState(false);           // 是否批量模式
+  const [currentMRIndex, setCurrentMRIndex] = useState(0);     // 当前查看的 MR 索引
 
   // 历史记录相关状态
   const [historyList, setHistoryList] = useState([]);
@@ -39,6 +44,44 @@ function App() {
     rules: { default_prompt: '' },
     gitlab: { url: '', private_token: '' }
   });
+
+  // URL 解析函数：从文本中提取所有 GitLab MR URL
+  const parseMRUrls = (text) => {
+    if (!text || !text.trim()) return [];
+
+    // 正则匹配 GitLab MR URL: https://gitlab.example.com/group/project/-/merge_requests/123
+    const urlRegex = /https?:\/\/[^\s,;，；\n]+?\/-\/merge_requests\/\d+/gi;
+    const matches = text.match(urlRegex) || [];
+
+    // 去重
+    const uniqueUrls = [...new Set(matches.map(url => url.trim()))];
+
+    // 解析每个 URL 提取信息
+    return uniqueUrls.map(url => {
+      const match = url.match(/^(https?:\/\/[^/]+)\/(.+?)\/-\/merge_requests\/(\d+)/);
+      if (match) {
+        return {
+          url: url,
+          baseUrl: match[1],
+          projectPath: match[2],
+          mrIid: match[3],
+          status: 'pending', // pending, loading, reviewing, completed, error
+          mrData: null,
+          aiComments: [],
+          sessionUuid: null,
+          error: null
+        };
+      }
+      return null;
+    }).filter(Boolean);
+  };
+
+  // 当 textarea 内容变化时解析 URL
+  useEffect(() => {
+    const parsed = parseMRUrls(mrUrlsText);
+    setParsedMRs(parsed);
+    setBatchMode(parsed.length > 1);
+  }, [mrUrlsText]);
 
   const scrollToNextSuggestion = () => {
     const els = document.querySelectorAll('.ai-suggestion-box');
@@ -132,47 +175,38 @@ function App() {
     failed: '失败'
   };
 
-  const triggerReview = async (e) => {
-    e.preventDefault();
-    if (!mrUrl) return;
-
-    // 解析 URL
-    const match = mrUrl.match(/^(https?:\/\/[^\/]+)\/(.+?)\/-\/merge_requests\/(\d+)/);
-    if (match) {
-      setParsedMR({ projectId: match[2], mrIid: match[3] });
-    } else {
-      setParsedMR({ projectId: '未知项目', mrIid: '未知ID' });
-    }
-
-    setIsSubmitting(true);
-    setMessage(null);
-    setAiComments([]);
-    setMrData(null);
-    setCurrentSessionUuid(null);
-    setStatusMessage('分析合并请求地址并请求 MR Diff 数据...');
+  // 审查单个 MR 的函数
+  const reviewSingleMR = async (mrInfo, index) => {
+    const url = mrInfo.url;
 
     try {
+      // 更新状态为 loading
+      setParsedMRs(prev => prev.map((mr, i) =>
+        i === index ? { ...mr, status: 'loading' } : mr
+      ));
+
       // 1. 获取 diff 数据
       const diffResp = await fetch(`${API_BASE}/api/mr/diff`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: mrUrl }),
+        body: JSON.stringify({ url }),
       });
       if (!diffResp.ok) throw new Error(`HTTP error! status: ${diffResp.status}`);
       const diffInfo = await diffResp.json();
-      setMrData({ ...diffInfo, url: mrUrl });
+
+      // 更新状态为 reviewing
+      setParsedMRs(prev => prev.map((mr, i) =>
+        i === index ? { ...mr, status: 'reviewing', mrData: { ...diffInfo, url } } : mr
+      ));
 
       // 2. 触发流式审查
-      setStatusMessage('正在由大语言模型逐行扫描代码...');
       const response = await fetch(`${API_BASE}/api/review/structured_stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: mrUrl }),
+        body: JSON.stringify({ url }),
       });
 
-      if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -194,39 +228,35 @@ function App() {
             try {
               const data = JSON.parse(dataStr);
               if (data.status === 'streaming') {
-                 // accumulated buffer for json lines
-                 pendingBuffer += data.chunk;
-                 const jsonLines = pendingBuffer.split(/\r?\n/);
-                 // keep the last potentially incomplete line in buffer
-                 pendingBuffer = jsonLines.pop();
+                pendingBuffer += data.chunk;
+                const jsonLines = pendingBuffer.split(/\r?\n/);
+                pendingBuffer = jsonLines.pop();
 
-                 for (const jLine of jsonLines) {
-                     if (!jLine.trim()) continue;
-                     try {
-                        const parsedObj = JSON.parse(jLine);
-                        if (parsedObj.new_path && (parsedObj.line || parsedObj.new_line)) {
-                           // add valid comment to state
-                           collectedComments.push(parsedObj);
-                           setAiComments(prev => [...prev, { ...parsedObj, gitlab_published: false }]);
-                        }
-                     } catch(e) { } // ignore incomplete json line parser errors
-                 }
-                 setStatusMessage('大语言模型正在深度分析代码中...');
+                for (const jLine of jsonLines) {
+                  if (!jLine.trim()) continue;
+                  try {
+                    const parsedObj = JSON.parse(jLine);
+                    if (parsedObj.new_path && (parsedObj.line || parsedObj.new_line)) {
+                      collectedComments.push(parsedObj);
+                      // 更新该 MR 的评论
+                      setParsedMRs(prev => prev.map((mr, i) =>
+                        i === index
+                          ? { ...mr, aiComments: [...mr.aiComments, { ...parsedObj, gitlab_published: false }] }
+                          : mr
+                      ));
+                    }
+                  } catch (e) { }
+                }
               } else if (data.status === 'info') {
-                setStatusMessage(data.message);
-                // 获取 session_uuid
                 if (data.session_uuid) {
                   sessionUuid = data.session_uuid;
-                  setCurrentSessionUuid(sessionUuid);
+                  setParsedMRs(prev => prev.map((mr, i) =>
+                    i === index ? { ...mr, sessionUuid } : mr
+                  ));
                 }
               } else if (data.status === 'error') {
-                setMessage({ type: 'error', text: data.message });
-                setIsSubmitting(false);
-                setStatusMessage('');
-                return;
+                throw new Error(data.message);
               } else if (data.status === 'done') {
-                setMessage({ type: 'success', text: data.message });
-                setStatusMessage('');
                 // 保存评论到数据库
                 if (sessionUuid && collectedComments.length > 0) {
                   try {
@@ -246,7 +276,7 @@ function App() {
                 }
               }
             } catch (err) {
-               console.error("解析SSE出错", err);
+              console.error("解析SSE出错", err);
             }
           }
         }
@@ -254,13 +284,17 @@ function App() {
 
       // flush remaining buffer
       if (pendingBuffer.trim()) {
-         try {
-            const parsedObj = JSON.parse(pendingBuffer);
-            if (parsedObj.new_path) {
-              collectedComments.push(parsedObj);
-              setAiComments(prev => [...prev, { ...parsedObj, gitlab_published: false }]);
-            }
-         } catch(e) {}
+        try {
+          const parsedObj = JSON.parse(pendingBuffer);
+          if (parsedObj.new_path) {
+            collectedComments.push(parsedObj);
+            setParsedMRs(prev => prev.map((mr, i) =>
+              i === index
+                ? { ...mr, aiComments: [...mr.aiComments, { ...parsedObj, gitlab_published: false }] }
+                : mr
+            ));
+          }
+        } catch (e) { }
       }
 
       // 最终保存评论
@@ -280,10 +314,77 @@ function App() {
           console.error('保存评论失败:', err);
         }
       }
+
+      // 更新状态为 completed
+      setParsedMRs(prev => prev.map((mr, i) =>
+        i === index ? { ...mr, status: 'completed' } : mr
+      ));
+
+      return { success: true, comments: collectedComments };
     } catch (error) {
-      setMessage({ type: 'error', text: '网络请求失败，请确保后端服务 (8000) 正在运行。' });
+      // 更新状态为 error
+      setParsedMRs(prev => prev.map((mr, i) =>
+        i === index ? { ...mr, status: 'error', error: error.message } : mr
+      ));
+      return { success: false, error: error.message };
+    }
+  };
+
+  // 批量审查入口函数
+  const triggerReview = async (e) => {
+    e.preventDefault();
+
+    if (parsedMRs.length === 0) {
+      setMessage({ type: 'error', text: '请输入有效的 GitLab MR URL' });
+      return;
+    }
+
+    setIsSubmitting(true);
+    setMessage(null);
+    setBatchResults([]);
+    setReviewProgress({ current: 0, total: parsedMRs.length });
+
+    if (batchMode) {
+      // 批量模式：逐个审查
+      for (let i = 0; i < parsedMRs.length; i++) {
+        setCurrentMRIndex(i);
+        setReviewProgress({ current: i + 1, total: parsedMRs.length });
+        setStatusMessage(`正在审查第 ${i + 1}/${parsedMRs.length} 个 MR: ${parsedMRs[i].projectPath} !${parsedMRs[i].mrIid}`);
+
+        const result = await reviewSingleMR(parsedMRs[i], i);
+        setBatchResults(prev => [...prev, result]);
+
+        // 每个审查完成后短暂暂停，避免 API 限流
+        if (i < parsedMRs.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+
+      const successCount = parsedMRs.filter(mr => mr.status === 'completed').length;
+      setMessage({
+        type: successCount === parsedMRs.length ? 'success' : 'warning',
+        text: `批量审查完成：${successCount}/${parsedMRs.length} 个 MR 审查成功`
+      });
+      setStatusMessage('');
+    } else {
+      // 单个模式：保持原有流程
+      const singleMR = parsedMRs[0];
+      setStatusMessage('分析合并请求地址并请求 MR Diff 数据...');
+
+      const result = await reviewSingleMR(singleMR, 0);
+
+      if (result.success) {
+        // 单个模式时同步状态到原有变量
+        setMrData(singleMR.mrData);
+        setAiComments(singleMR.aiComments);
+        setCurrentSessionUuid(singleMR.sessionUuid);
+        setMessage({ type: 'success', text: '审查完成' });
+      } else {
+        setMessage({ type: 'error', text: result.error || '审查失败' });
+      }
       setStatusMessage('');
     }
+
     setIsSubmitting(false);
   };
 
@@ -351,58 +452,249 @@ function App() {
             <div>
               <div className="max-w-xl mx-auto text-center mb-8">
                 <h2 className="text-3xl font-semibold tracking-tight mb-3">自动化 MR 审查</h2>
-                <p className="text-gray-500 text-sm">黏贴 GitLab URL，无需繁琐人工操作，后端直连自动拉取 Diff 分析并回评</p>
+                <p className="text-gray-500 text-sm">黏贴 GitLab URL，支持批量审查多个 MR（换行/空格/逗号分隔）</p>
               </div>
 
-              {isSubmitting || mrData ? (
-                <div className="max-w-xl mx-auto flex flex-col sm:flex-row items-center justify-between bg-white shadow-sm p-4 rounded-2xl border border-gray-100 gap-4 transition-all animate-in fade-in zoom-in duration-300">
-                   <div className="flex items-center gap-3 w-full">
-                      <div className="flex-shrink-0 w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-appleBlue">
-                        <GitMerge size={20} />
-                      </div>
-                      <div className="text-left min-w-0 flex-1">
-                         <div className="text-xs text-gray-400 font-medium mb-0.5">正在审查当前代码合并记录</div>
-                         <div className="text-sm font-semibold text-gray-700 truncate w-full flex items-center gap-1.5">
-                            <span className="truncate">{parsedMR?.projectId}</span>
-                            <span className="text-gray-300 flex-shrink-0">/</span>
-                            <span className="text-appleBlue flex-shrink-0">!{parsedMR?.mrIid}</span>
-                         </div>
-                      </div>
-                   </div>
-                </div>
-              ) : (
-                <form onSubmit={triggerReview} className="max-w-xl mx-auto space-y-5">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2 ml-2 flex items-center justify-between">
-                       <span>GitLab Merge Request 地址</span>
-                    </label>
-                    <div className="relative">
-                      <input 
-                        type="url" 
-                        value={mrUrl}
-                        onChange={(e) => setMrUrl(e.target.value)}
-                        placeholder="例：https://gitlab.../-/merge_requests/3122" 
-                        className="apple-input"
-                        required
-                      />
+              {/* 批量模式：显示 MR 列表 */}
+              {batchMode && parsedMRs.length > 0 ? (
+                <div className="max-w-3xl mx-auto">
+                  {/* MR 列表 */}
+                  <div className="mb-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-semibold flex items-center gap-2">
+                        <List size={20} className="text-appleBlue" />
+                        识别到 {parsedMRs.length} 个 Merge Request
+                      </h3>
+                      {reviewProgress.total > 0 && (
+                        <div className="text-sm text-gray-500">
+                          进度: {reviewProgress.current}/{reviewProgress.total}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-3">
+                      {parsedMRs.map((mr, index) => (
+                        <div
+                          key={index}
+                          onClick={() => !isSubmitting && mr.status === 'completed' && setCurrentMRIndex(index)}
+                          className={`bg-white border rounded-xl p-4 transition-all ${
+                            mr.status === 'completed' ? 'cursor-pointer hover:shadow-md border-green-200' :
+                            mr.status === 'reviewing' ? 'border-blue-300 bg-blue-50/30' :
+                            mr.status === 'error' ? 'border-red-200 bg-red-50/30' :
+                            'border-gray-100'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                              <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
+                                mr.status === 'completed' ? 'bg-green-100 text-green-600' :
+                                mr.status === 'reviewing' || mr.status === 'loading' ? 'bg-blue-100 text-blue-600' :
+                                mr.status === 'error' ? 'bg-red-100 text-red-600' :
+                                'bg-gray-100 text-gray-400'
+                              }`}>
+                                {mr.status === 'reviewing' || mr.status === 'loading' ? (
+                                  <Loader2 size={20} className="animate-spin" />
+                                ) : mr.status === 'completed' ? (
+                                  <CheckCircle2 size={20} />
+                                ) : mr.status === 'error' ? (
+                                  <XCircle size={20} />
+                                ) : (
+                                  <GitMerge size={20} />
+                                )}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-sm font-medium text-gray-800 truncate">
+                                  {mr.projectPath} !{mr.mrIid}
+                                </div>
+                                <div className="text-xs text-gray-500 mt-0.5">
+                                  {mr.aiComments?.length || 0} 条审查建议
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex-shrink-0 ml-4">
+                              <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                                mr.status === 'completed' ? 'bg-green-100 text-green-700' :
+                                mr.status === 'reviewing' ? 'bg-blue-100 text-blue-700 animate-pulse' :
+                                mr.status === 'loading' ? 'bg-blue-100 text-blue-700' :
+                                mr.status === 'error' ? 'bg-red-100 text-red-700' :
+                                'bg-gray-100 text-gray-600'
+                              }`}>
+                                {mr.status === 'completed' ? '已完成' :
+                                 mr.status === 'reviewing' ? '审查中' :
+                                 mr.status === 'loading' ? '加载中' :
+                                 mr.status === 'error' ? '失败' : '等待中'}
+                              </span>
+                            </div>
+                          </div>
+                          {mr.error && (
+                            <div className="mt-2 text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+                              {mr.error}
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </div>
 
-                  <div className="pt-4">
-                    <button 
-                      type="submit" 
-                      disabled={isSubmitting}
-                      className="w-full apple-btn justify-center py-3.5 shadow-md shadow-appleBlue/20"
-                    >
-                      <Play size={18} className={isSubmitting ? 'animate-pulse' : ''} />
-                      {isSubmitting ? '启动审查流...' : '一键开始审查代码'}
-                    </button>
-                  </div>
-                </form>
+                  {/* 操作按钮 */}
+                  {!isSubmitting && parsedMRs.every(mr => mr.status === 'pending' || mr.status === 'error') && (
+                    <div className="flex gap-3">
+                      <button
+                        onClick={triggerReview}
+                        className="flex-1 apple-btn justify-center py-3.5 shadow-md shadow-appleBlue/20"
+                      >
+                        <Play size={18} />
+                        开始批量审查
+                      </button>
+                      <button
+                        onClick={() => {
+                          setMrUrlsText('');
+                          setParsedMRs([]);
+                          setBatchMode(false);
+                        }}
+                        className="px-6 py-3.5 text-gray-600 bg-gray-100 rounded-xl font-medium hover:bg-gray-200 transition-colors"
+                      >
+                        清空
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 审查中显示进度 */}
+                  {isSubmitting && statusMessage && (
+                    <div className="flex items-center justify-center gap-3 text-appleBlue bg-blue-50 px-4 py-3 rounded-xl">
+                      <Loader2 size={18} className="animate-spin" />
+                      <span className="text-sm font-medium">{statusMessage}</span>
+                    </div>
+                  )}
+
+                  {/* 审查完成后显示结果 */}
+                  {!isSubmitting && parsedMRs.some(mr => mr.status === 'completed') && (
+                    <div className="mt-6">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-lg font-semibold">审查结果</h3>
+                        <button
+                          onClick={() => {
+                            setMrUrlsText('');
+                            setParsedMRs([]);
+                            setBatchMode(false);
+                          }}
+                          className="text-sm text-appleBlue hover:text-blue-600 font-medium"
+                        >
+                          开始新的审查
+                        </button>
+                      </div>
+
+                      {/* Tab 切换查看不同 MR */}
+                      <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
+                        {parsedMRs.filter(mr => mr.status === 'completed').map((mr, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => setCurrentMRIndex(parsedMRs.findIndex(m => m === mr))}
+                            className={`flex-shrink-0 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                              currentMRIndex === parsedMRs.findIndex(m => m === mr)
+                                ? 'bg-appleBlue text-white'
+                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                            }`}
+                          >
+                            {mr.projectPath.split('/').pop()} !{mr.mrIid}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* 显示当前选中 MR 的 Diff */}
+                      {parsedMRs[currentMRIndex]?.status === 'completed' && parsedMRs[currentMRIndex]?.mrData && (
+                        <DiffViewer
+                          mrData={parsedMRs[currentMRIndex].mrData}
+                          aiComments={parsedMRs[currentMRIndex].aiComments}
+                          onDeleteComment={(comment) => {
+                            setParsedMRs(prev => prev.map((mr, i) =>
+                              i === currentMRIndex
+                                ? { ...mr, aiComments: mr.aiComments.filter(c => c !== comment) }
+                                : mr
+                            ));
+                          }}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                /* 单个模式或未开始 */
+                <>
+                  {isSubmitting || mrData ? (
+                    <div className="max-w-xl mx-auto flex flex-col sm:flex-row items-center justify-between bg-white shadow-sm p-4 rounded-2xl border border-gray-100 gap-4 transition-all animate-in fade-in zoom-in duration-300">
+                       <div className="flex items-center gap-3 w-full">
+                          <div className="flex-shrink-0 w-10 h-10 rounded-full bg-blue-50 flex items-center justify-center text-appleBlue">
+                            <GitMerge size={20} />
+                          </div>
+                          <div className="text-left min-w-0 flex-1">
+                             <div className="text-xs text-gray-400 font-medium mb-0.5">正在审查当前代码合并记录</div>
+                             <div className="text-sm font-semibold text-gray-700 truncate w-full flex items-center gap-1.5">
+                                <span className="truncate">{parsedMRs[0]?.projectPath}</span>
+                                <span className="text-gray-300 flex-shrink-0">/</span>
+                                <span className="text-appleBlue flex-shrink-0">!{parsedMRs[0]?.mrIid}</span>
+                             </div>
+                          </div>
+                       </div>
+                    </div>
+                  ) : (
+                    <form onSubmit={triggerReview} className="max-w-xl mx-auto space-y-5">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2 ml-2 flex items-center justify-between">
+                           <span>GitLab Merge Request 地址</span>
+                           {parsedMRs.length > 0 && (
+                             <span className="text-xs text-appleBlue font-normal">
+                               识别到 {parsedMRs.length} 个 MR
+                             </span>
+                           )}
+                        </label>
+                        <div className="relative">
+                          <textarea
+                            value={mrUrlsText}
+                            onChange={(e) => setMrUrlsText(e.target.value)}
+                            placeholder="例：https://gitlab.../-/merge_requests/3122&#10;支持多行输入，每行一个 MR 地址&#10;或用空格、逗号分隔多个 URL"
+                            className="apple-input min-h-[120px] resize-y"
+                            rows={4}
+                          />
+                        </div>
+                        {parsedMRs.length > 1 && (
+                          <div className="mt-2 p-3 bg-blue-50 rounded-xl text-sm text-blue-700">
+                            <div className="flex items-center gap-2 font-medium mb-2">
+                              <List size={16} />
+                              将进入批量审查模式
+                            </div>
+                            <ul className="space-y-1 ml-5 list-disc text-xs text-blue-600">
+                              {parsedMRs.slice(0, 3).map((mr, i) => (
+                                <li key={i}>{mr.projectPath} !{mr.mrIid}</li>
+                              ))}
+                              {parsedMRs.length > 3 && (
+                                <li className="text-blue-500">...还有 {parsedMRs.length - 3} 个</li>
+                              )}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="pt-4">
+                        <button
+                          type="submit"
+                          disabled={isSubmitting || parsedMRs.length === 0}
+                          className="w-full apple-btn justify-center py-3.5 shadow-md shadow-appleBlue/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Play size={18} className={isSubmitting ? 'animate-pulse' : ''} />
+                          {isSubmitting ? '启动审查流...' :
+                           parsedMRs.length > 1 ? `批量审查 ${parsedMRs.length} 个 MR` :
+                           '一键开始审查代码'}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </>
               )}
             </div>
 
-            {(statusMessage || mrData || isSubmitting) && (
+            {/* 单个模式的 Diff 展示 */}
+            {!batchMode && (statusMessage || mrData || isSubmitting) && (
               <div className="mt-8 pt-4 w-full text-left animate-in fade-in slide-in-from-bottom-4 duration-500">
                 <div className="flex items-center justify-between mb-4 px-2 max-w-2xl mx-auto">
                    <h3 className="text-xl font-semibold flex items-center gap-2 text-appleGray-800">
