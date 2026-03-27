@@ -186,6 +186,15 @@ function App() {
             </div>
           )}
 
+          {message?.type === 'error' && (
+            <div className="px-4 md:px-10 pt-4 bg-white">
+              <div className="w-full p-4 rounded-2xl flex items-center gap-3 bg-red-50 text-red-800 border border-red-100">
+                <ShieldAlert size={20} />
+                <span className="text-sm md:text-base font-medium">{message.text}</span>
+              </div>
+            </div>
+          )}
+
           <div
             ref={reportContainerRef}
             className="flex-1 overflow-y-auto scroll-smooth bg-white px-6 py-8 md:px-16 md:py-12"
@@ -198,11 +207,17 @@ function App() {
               </div>
             ) : (
               <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-4">
-                <div className="w-10 h-10 relative">
-                  <div className="absolute inset-0 rounded-full border-2 border-gray-200"></div>
-                  <div className="absolute inset-0 rounded-full border-2 border-appleBlue border-t-transparent animate-spin"></div>
-                </div>
-                <span className="text-lg">正在准备输出内容...</span>
+                {isSubmitting ? (
+                  <>
+                    <div className="w-10 h-10 relative">
+                      <div className="absolute inset-0 rounded-full border-2 border-gray-200"></div>
+                      <div className="absolute inset-0 rounded-full border-2 border-appleBlue border-t-transparent animate-spin"></div>
+                    </div>
+                    <span className="text-lg">正在准备输出内容...</span>
+                  </>
+                ) : (
+                  <span className="text-lg">暂无审查内容</span>
+                )}
               </div>
             )}
             {isSubmitting && reviewReport && (
@@ -237,6 +252,15 @@ function App() {
               )}
             </div>
           </div>
+
+          {message?.type === 'error' && (
+            <div className="mb-4 px-2">
+              <div className="w-full p-4 rounded-2xl flex items-center gap-3 bg-red-50 text-red-800 border border-red-100">
+                <ShieldAlert size={20} />
+                <span className="text-sm font-medium">{message.text}</span>
+              </div>
+            </div>
+          )}
 
           <div className="relative overflow-hidden group">
             <div className="absolute inset-0 bg-gradient-to-tr from-blue-50/50 to-white pointer-events-none rounded-3xl" />
@@ -515,7 +539,7 @@ function App() {
         </>
       )}
 
-      {showReportPanel && isFullscreenMode && renderReportContent(true)}
+      {isFullscreenMode && renderReportContent(true)}
     </div>
   );
 }
