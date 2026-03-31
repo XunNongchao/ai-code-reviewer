@@ -200,6 +200,9 @@ function App() {
       setParsedMRs(prev => prev.map((mr, i) =>
         i === index ? { ...mr, status: 'reviewing', mrData: { ...diffInfo, url } } : mr
       ));
+      if (!batchMode && index === 0) {
+        setMrData({ ...diffInfo, url });
+      }
 
       // 2. 触发流式审查
       const response = await fetch(`${API_BASE}/api/review/structured_stream`, {
@@ -246,6 +249,9 @@ function App() {
                           ? { ...mr, aiComments: [...mr.aiComments, { ...parsedObj, gitlab_published: false }] }
                           : mr
                       ));
+                      if (!batchMode && index === 0) {
+                        setAiComments(prev => [...prev, { ...parsedObj, gitlab_published: false }]);
+                      }
                     }
                   } catch (e) { }
                 }
@@ -255,6 +261,9 @@ function App() {
                   setParsedMRs(prev => prev.map((mr, i) =>
                     i === index ? { ...mr, sessionUuid } : mr
                   ));
+                  if (!batchMode && index === 0) {
+                    setCurrentSessionUuid(sessionUuid);
+                  }
                 }
               } else if (data.status === 'error') {
                 throw new Error(data.message);
@@ -295,6 +304,9 @@ function App() {
                 ? { ...mr, aiComments: [...mr.aiComments, { ...parsedObj, gitlab_published: false }] }
                 : mr
             ));
+            if (!batchMode && index === 0) {
+              setAiComments(prev => [...prev, { ...parsedObj, gitlab_published: false }]);
+            }
           }
         } catch (e) { }
       }
@@ -377,10 +389,6 @@ function App() {
       const result = await reviewSingleMR(singleMR, 0);
 
       if (result.success) {
-        // 单个模式时同步状态到原有变量
-        setMrData(singleMR.mrData);
-        setAiComments(singleMR.aiComments);
-        setCurrentSessionUuid(singleMR.sessionUuid);
         setMessage({ type: 'success', text: '审查完成' });
       } else {
         setMessage({ type: 'error', text: result.error || '审查失败' });
