@@ -40,6 +40,7 @@ function App() {
   const [historyList, setHistoryList] = useState([]);
   const [historyDetail, setHistoryDetail] = useState(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [isFullscreenMode, setIsFullscreenMode] = useState(false);
 
   const [config, setConfig] = useState({
     llm_config: { provider: 'openai', model_name: '', base_url: '', api_key: '' },
@@ -84,6 +85,25 @@ function App() {
     setParsedMRs(parsed);
     setBatchMode(parsed.length > 1);
   }, [mrUrlsText]);
+
+  useEffect(() => {
+    const onKeydown = (event) => {
+      if (event.key === 'Escape' && isFullscreenMode) {
+        setIsFullscreenMode(false);
+      }
+    };
+
+    window.addEventListener('keydown', onKeydown);
+    return () => window.removeEventListener('keydown', onKeydown);
+  }, [isFullscreenMode]);
+
+  const enterFullscreenMode = () => {
+    setIsFullscreenMode(true);
+  };
+
+  const exitFullscreenMode = () => {
+    setIsFullscreenMode(false);
+  };
 
   const scrollToNextSuggestion = () => {
     const els = document.querySelectorAll('.ai-suggestion-box');
@@ -255,7 +275,11 @@ function App() {
                     }
                   } catch (e) { }
                 }
+                setStatusMessage('大语言模型正在深度分析代码中...');
               } else if (data.status === 'info') {
+                if (data.message) {
+                  setStatusMessage(data.message);
+                }
                 if (data.session_uuid) {
                   sessionUuid = data.session_uuid;
                   setParsedMRs(prev => prev.map((mr, i) =>
@@ -353,38 +377,54 @@ function App() {
       return;
     }
 
+    const reviewQueue = parsedMRs.map(mr => ({
+      ...mr,
+      status: 'pending',
+      mrData: null,
+      aiComments: [],
+      sessionUuid: null,
+      error: null
+    }));
+
     setIsSubmitting(true);
     setMessage(null);
+    setParsedMRs(reviewQueue);
     setBatchResults([]);
-    setReviewProgress({ current: 0, total: parsedMRs.length });
+    setReviewProgress({ current: 0, total: reviewQueue.length });
+    setCurrentMRIndex(0);
+    setCurrentSessionUuid(null);
+    setAiComments([]);
+    setMrData(null);
 
     if (batchMode) {
+      setIsFullscreenMode(false);
       // 批量模式：逐个审查
       let successCount = 0;
-      for (let i = 0; i < parsedMRs.length; i++) {
+      for (let i = 0; i < reviewQueue.length; i++) {
         setCurrentMRIndex(i);
-        setReviewProgress({ current: i + 1, total: parsedMRs.length });
-        setStatusMessage(`正在审查第 ${i + 1}/${parsedMRs.length} 个 MR: ${parsedMRs[i].projectPath} !${parsedMRs[i].mrIid}`);
+        setReviewProgress({ current: i + 1, total: reviewQueue.length });
+        setStatusMessage(`正在审查第 ${i + 1}/${reviewQueue.length} 个 MR: ${reviewQueue[i].projectPath} !${reviewQueue[i].mrIid}`);
 
-        const result = await reviewSingleMR(parsedMRs[i], i);
+        const result = await reviewSingleMR(reviewQueue[i], i);
         if (result.success) successCount++;
         setBatchResults(prev => [...prev, result]);
 
         // 每个审查完成后短暂暂停，避免 API 限流
-        if (i < parsedMRs.length - 1) {
+        if (i < reviewQueue.length - 1) {
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
       }
 
       setMessage({
-        type: successCount === parsedMRs.length ? 'success' : 'warning',
-        text: `批量审查完成：${successCount}/${parsedMRs.length} 个 MR 审查成功`
+        type: successCount === reviewQueue.length ? 'success' : 'warning',
+        text: `批量审查完成：${successCount}/${reviewQueue.length} 个 MR 审查成功`
       });
       setStatusMessage('');
     } else {
       // 单个模式：保持原有流程
-      const singleMR = parsedMRs[0];
+      const singleMR = reviewQueue[0];
       setStatusMessage('分析合并请求地址并请求 MR Diff 数据...');
+      setIsFullscreenMode(true);
 
       const result = await reviewSingleMR(singleMR, 0);
 
@@ -410,9 +450,126 @@ function App() {
     setIsSubmitting(false);
   };
 
+  const currentReviewMR = batchMode ? parsedMRs[currentMRIndex] : parsedMRs[0];
+  const currentReviewData = batchMode ? currentReviewMR?.mrData : mrData;
+  const currentReviewComments = batchMode ? (currentReviewMR?.aiComments || []) : aiComments;
+
+  const handleDeleteCurrentComment = (comment) => {
+    if (batchMode) {
+      setParsedMRs(prev => prev.map((mr, i) =>
+        i === currentMRIndex
+          ? { ...mr, aiComments: mr.aiComments.filter(c => c !== comment) }
+          : mr
+      ));
+      return;
+    }
+
+    setAiComments(prev => prev.filter(c => c !== comment));
+  };
+
+  const renderFullscreenDiffViewer = () => (
+    <div className="fixed inset-0 z-[100] bg-white flex flex-col animate-fade-in-scale">
+      <div className="flex items-center justify-between gap-6 px-6 md:px-10 py-5 bg-white border-b border-gray-200 shadow-sm">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-3xl">🔍</span>
+            <h3 className="text-2xl md:text-3xl font-semibold text-appleGray-800">AI 审查聚焦模式</h3>
+          </div>
+          {statusMessage && (
+            <div className="hidden md:flex items-center gap-2 text-base text-appleBlue font-medium bg-blue-50 px-5 py-2.5 rounded-full animate-pulse">
+              <div className="w-2.5 h-2.5 rounded-full bg-appleBlue"></div>
+              {statusMessage}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {currentReviewMR && (
+            <div className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 px-4 py-2 rounded-full border border-gray-200">
+              <GitMerge size={16} />
+              <span className="font-medium">{currentReviewMR.projectPath}</span>
+              <span className="text-gray-300">/</span>
+              <span className="text-appleBlue font-medium">!{currentReviewMR.mrIid}</span>
+            </div>
+          )}
+          <button
+            onClick={exitFullscreenMode}
+            className="flex items-center gap-2 text-base font-medium text-gray-600 hover:text-red-500 bg-white px-5 py-2.5 rounded-full transition-all shadow-sm hover:shadow-md border border-gray-200 hover:border-red-200"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+            退出聚焦
+          </button>
+        </div>
+      </div>
+
+      {statusMessage && (
+        <div className="md:hidden px-4 pt-4 bg-white">
+          <div className="flex items-center gap-2 text-sm text-appleBlue font-medium bg-blue-50 px-4 py-2 rounded-2xl animate-pulse">
+            <div className="w-2 h-2 rounded-full bg-appleBlue"></div>
+            {statusMessage}
+          </div>
+        </div>
+      )}
+
+      {message?.type === 'error' && (
+        <div className="px-4 md:px-10 pt-4 bg-white">
+          <div className="w-full p-4 rounded-2xl flex items-center gap-3 bg-red-50 text-red-800 border border-red-100">
+            <ShieldAlert size={20} />
+            <span className="text-sm md:text-base font-medium">{message.text}</span>
+          </div>
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto bg-gray-50 px-4 md:px-8 py-6">
+        <div className="max-w-full mx-auto">
+          {currentReviewData ? (
+            <DiffViewer
+              mrData={currentReviewData}
+              aiComments={currentReviewComments}
+              onDeleteComment={handleDeleteCurrentComment}
+            />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-4 py-20">
+              <div className="w-16 h-16 relative">
+                <div className="absolute inset-0 rounded-full border-4 border-gray-200"></div>
+                <div className="absolute inset-0 rounded-full border-4 border-appleBlue border-t-transparent animate-spin"></div>
+              </div>
+              <div className="text-center">
+                <p className="text-lg font-medium text-gray-600">正在加载代码差异...</p>
+                <p className="text-sm mt-2">请稍候片刻</p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {currentReviewComments.length > 0 && (
+        <div className="fixed bottom-8 right-8 flex flex-col gap-3 z-50">
+          <button onClick={scrollToPrevSuggestion} className="w-14 h-14 bg-white text-appleGray-800 rounded-full shadow-lg border border-gray-100 hover:bg-gray-50 flex items-center justify-center animate-in fade-in slide-in-from-bottom-4 transition-all hover:scale-105" title="上一个审查点">
+             <ChevronUp size={28} />
+          </button>
+          <button onClick={scrollToNextSuggestion} className="w-14 h-14 bg-appleBlue text-white rounded-full shadow-lg shadow-appleBlue/30 flex items-center justify-center animate-in fade-in slide-in-from-bottom-4 transition-all hover:scale-105" title="下一个审查点">
+             <ChevronDown size={28} />
+          </button>
+        </div>
+      )}
+
+      {currentReviewComments.length > 0 && (
+        <div className="fixed bottom-8 left-8 bg-white rounded-full shadow-lg border border-gray-200 px-6 py-3 flex items-center gap-3 z-50">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl">💡</span>
+            <span className="text-sm font-medium text-gray-700">已生成 <span className="text-appleBlue font-bold text-lg">{currentReviewComments.length}</span> 条审查建议</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-appleGray-50 py-12 px-4 sm:px-6 lg:px-8 flex flex-col items-center selection:bg-blue-100">
-      
+      {!isFullscreenMode && (
+        <>
       {/* Header */}
       <div className="w-full max-w-4xl flex items-center justify-between mb-10">
         <div className="flex items-center gap-3">
@@ -614,17 +771,31 @@ function App() {
 
                       {/* 显示当前选中 MR 的 Diff */}
                       {parsedMRs[currentMRIndex]?.status === 'completed' && parsedMRs[currentMRIndex]?.mrData && (
-                        <DiffViewer
-                          mrData={parsedMRs[currentMRIndex].mrData}
-                          aiComments={parsedMRs[currentMRIndex].aiComments}
-                          onDeleteComment={(comment) => {
-                            setParsedMRs(prev => prev.map((mr, i) =>
-                              i === currentMRIndex
-                                ? { ...mr, aiComments: mr.aiComments.filter(c => c !== comment) }
-                                : mr
-                            ));
-                          }}
-                        />
+                        <>
+                          <div className="flex justify-end mb-4">
+                            <button
+                              onClick={enterFullscreenMode}
+                              className="flex items-center gap-2 text-sm font-medium text-appleBlue bg-blue-50 hover:bg-blue-100 px-4 py-2 rounded-full transition-all hover:scale-105"
+                              title="进入聚焦模式查看详细审查"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                              </svg>
+                              聚焦模式
+                            </button>
+                          </div>
+                          <DiffViewer
+                            mrData={parsedMRs[currentMRIndex].mrData}
+                            aiComments={parsedMRs[currentMRIndex].aiComments}
+                            onDeleteComment={(comment) => {
+                              setParsedMRs(prev => prev.map((mr, i) =>
+                                i === currentMRIndex
+                                  ? { ...mr, aiComments: mr.aiComments.filter(c => c !== comment) }
+                                  : mr
+                              ));
+                            }}
+                          />
+                        </>
                       )}
                     </div>
                   )}
@@ -646,6 +817,18 @@ function App() {
                                 <span className="text-appleBlue flex-shrink-0">!{parsedMRs[0]?.mrIid}</span>
                              </div>
                           </div>
+                          {(mrData || aiComments.length > 0) && (
+                            <button
+                              onClick={enterFullscreenMode}
+                              className="flex items-center gap-2 text-sm font-medium text-appleBlue bg-blue-50 hover:bg-blue-100 px-4 py-2 rounded-full transition-all hover:scale-105"
+                              title="进入聚焦模式查看详细审查"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                              </svg>
+                              聚焦模式
+                            </button>
+                          )}
                        </div>
                     </div>
                   ) : (
@@ -1062,7 +1245,10 @@ function App() {
             <span className="text-sm font-medium pr-1">回到顶部</span>
          </button>
       </div>
+        </>
+      )}
 
+      {isFullscreenMode && renderFullscreenDiffViewer()}
     </div>
   );
 }
