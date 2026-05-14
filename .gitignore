@@ -20,8 +20,6 @@ backend/data/
 
 # Node
 node_modules/
-package.json
-package-lock.json
 frontend/node_modules/
 frontend/dist/
 frontend/npm-debug.log*
