@@ -51,7 +51,7 @@ pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-启动后会在 `backend/data/` 目录下自动生成 `code_reviewer.db` 数据库文件，无需手动建表。
+> **数据库说明**：首次启动时后端会自动在 `backend/data/` 目录下创建 SQLite 数据库文件 `code_reviewer.db`，并根据 `schema.sql` 初始化所有表结构。无需手动执行任何建表命令。
 
 ### 2. 启动前端
 
