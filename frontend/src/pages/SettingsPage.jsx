@@ -44,8 +44,8 @@ export default function SettingsPage({ onMessage }) {
                 value={config.llm_config?.provider || 'openai'}
                 onChange={(e) => setConfig({ ...config, llm_config: { ...config.llm_config, provider: e.target.value } })}
               >
-                <option value="openai">OpenAI 兼容协议（适用于 OpenAI / 智谱 / 通义 / DeepSeek / 中转站）</option>
-                <option value="anthropic">Anthropic 协议（适用于 Claude 系列）</option>
+                <option value="openai">OpenAI 兼容协议</option>
+                <option value="anthropic">Anthropic 协议</option>
               </select>
             </div>
             <div>
